@@ -20,3 +20,5 @@ dist/
 .vite/
 
 logs/
+
+cooling_system_v2.sql
