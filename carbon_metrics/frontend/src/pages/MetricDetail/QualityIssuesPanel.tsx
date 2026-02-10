@@ -36,6 +36,27 @@ interface UnmappedTagRow {
   count: number;
 }
 
+interface MissingBucketRow {
+  key: string;
+  metric_name: string;
+  bucket_time: string;
+  expected_samples: number;
+  actual_samples: number;
+  completeness_rate: number;
+}
+
+interface SevereNegativeTypeRow {
+  key: string;
+  equipment_type: string;
+  count: number;
+  total: number;
+}
+
+interface SensorBiasRow {
+  key: string;
+  point: string;
+}
+
 type IssueGroup = 'partial' | 'no_data';
 
 const { Text } = Typography;
@@ -184,6 +205,76 @@ function buildUnmappedTagRows(details: Record<string, unknown>): UnmappedTagRow[
     .slice(0, 10);
 }
 
+function buildMissingBucketRows(details: Record<string, unknown>): MissingBucketRow[] {
+  const raw = details.missing_bucket_samples;
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+
+  return raw
+    .map((item, index) => {
+      if (!isRecord(item)) {
+        return null;
+      }
+      return {
+        key: `${String(item.metric_name ?? '')}-${String(item.bucket_time ?? '')}-${index}`,
+        metric_name: String(item.metric_name ?? ''),
+        bucket_time: String(item.bucket_time ?? ''),
+        expected_samples: toSafeNumber(item.expected_samples),
+        actual_samples: toSafeNumber(item.actual_samples),
+        completeness_rate: toSafeNumber(item.completeness_rate),
+      };
+    })
+    .filter((item): item is MissingBucketRow => item !== null);
+}
+
+function buildSevereNegativeTypeRows(details: Record<string, unknown>): SevereNegativeTypeRow[] {
+  const raw = details.severe_negative_by_type;
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  return raw
+    .map((item, index) => {
+      if (!isRecord(item)) {
+        return null;
+      }
+      return {
+        key: `${String(item.equipment_type ?? '')}-${index}`,
+        equipment_type: String(item.equipment_type ?? ''),
+        count: toSafeNumber(item.count),
+        total: toSafeNumber(item.total),
+      };
+    })
+    .filter((item): item is SevereNegativeTypeRow => item !== null);
+}
+
+function buildSensorBiasRows(details: Record<string, unknown>): SensorBiasRow[] {
+  const raw = details.sensor_bias_points;
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  return raw
+    .map((item, index) => {
+      if (!isRecord(item)) {
+        return null;
+      }
+      const devicePath = String(item.device_path ?? '').trim();
+      if (!devicePath) {
+        return null;
+      }
+      const negativeCount = toSafeNumber(item.negative_count);
+      const totalCount = toSafeNumber(item.total_count);
+      const ratio = toSafeNumber(item.negative_ratio);
+      const minValue = toSafeNumber(item.min_value);
+      const summary = `${devicePath}（负值 ${negativeCount}/${totalCount}, ${ratio.toFixed(2)}%, min=${minValue.toFixed(2)}）`;
+      return {
+        key: `${devicePath}-${index}`,
+        point: summary,
+      };
+    })
+    .filter((item): item is SensorBiasRow => item !== null);
+}
+
 function getIssueDetailBlock(issue: QualityIssue): ReactNode {
   const details = isRecord(issue.details) ? issue.details : undefined;
   const lines: string[] = [];
@@ -207,6 +298,30 @@ function getIssueDetailBlock(issue: QualityIssue): ReactNode {
     if (typeof avgCompleteness === 'number') {
       lines.push(`平均完整率: ${avgCompleteness}%`);
     }
+
+    if (typeof details.incomplete_bucket_count === 'number') {
+      lines.push(`缺失时段条数: ${details.incomplete_bucket_count}`);
+    }
+
+    if (typeof details.clamp_threshold === 'number') {
+      lines.push(`负值归零阈值: ${details.clamp_threshold}`);
+    }
+
+    if (typeof details.clamped_negative_total === 'number') {
+      lines.push(`已归零负值合计: ${details.clamped_negative_total}`);
+    }
+
+    if (typeof details.severe_negative_total === 'number') {
+      lines.push(`超阈值负值合计(保留原值): ${details.severe_negative_total}`);
+    }
+
+    if (typeof details.policy === 'string' && details.policy.trim()) {
+      lines.push(`处理规则: ${details.policy}`);
+    }
+
+    if (typeof details.min_negative_count === 'number') {
+      lines.push(`黑名单告警最小负值条数: ${details.min_negative_count}`);
+    }
   }
 
   const dependencyRows = details ? buildDependencyRows(details) : [];
@@ -214,6 +329,9 @@ function getIssueDetailBlock(issue: QualityIssue): ReactNode {
   const missingComponentRows = details ? buildMissingComponentRows(details) : [];
   const missingDiagnosticRows = details ? buildMissingDiagnosticRows(details) : [];
   const unmappedTagRows = details ? buildUnmappedTagRows(details) : [];
+  const missingBucketRows = details ? buildMissingBucketRows(details) : [];
+  const severeNegativeTypeRows = details ? buildSevereNegativeTypeRows(details) : [];
+  const sensorBiasRows = details ? buildSensorBiasRows(details) : [];
 
   if (
     !lines.length
@@ -222,6 +340,9 @@ function getIssueDetailBlock(issue: QualityIssue): ReactNode {
     && !availableRows.length
     && !missingDiagnosticRows.length
     && !unmappedTagRows.length
+    && !missingBucketRows.length
+    && !severeNegativeTypeRows.length
+    && !sensorBiasRows.length
   ) {
     return undefined;
   }
@@ -317,6 +438,65 @@ function getIssueDetailBlock(issue: QualityIssue): ReactNode {
               { title: 'raw记录数', dataIndex: 'count', key: 'count', width: 120 },
             ]}
             dataSource={unmappedTagRows}
+          />
+        </div>
+      )}
+
+      {missingBucketRows.length > 0 && (
+        <div>
+          <Text strong>缺失时段样例</Text>
+          <Table<MissingBucketRow>
+            size="small"
+            pagination={false}
+            rowKey="key"
+            style={{ marginTop: 6 }}
+            scroll={{ x: 900 }}
+            columns={[
+              { title: 'metric_name', dataIndex: 'metric_name', key: 'metric_name', width: 180 },
+              { title: 'bucket_time', dataIndex: 'bucket_time', key: 'bucket_time', width: 180 },
+              { title: 'actual', dataIndex: 'actual_samples', key: 'actual_samples', width: 80 },
+              { title: 'expected', dataIndex: 'expected_samples', key: 'expected_samples', width: 90 },
+              {
+                title: 'completeness',
+                dataIndex: 'completeness_rate',
+                key: 'completeness_rate',
+                width: 110,
+                render: (value: number) => `${value.toFixed(1)}%`,
+              },
+            ]}
+            dataSource={missingBucketRows}
+          />
+        </div>
+      )}
+
+      {severeNegativeTypeRows.length > 0 && (
+        <div>
+          <Text strong>超阈值负值分布（Top）</Text>
+          <Table<SevereNegativeTypeRow>
+            size="small"
+            pagination={false}
+            rowKey="key"
+            style={{ marginTop: 6 }}
+            columns={[
+              { title: 'equipment_type', dataIndex: 'equipment_type', key: 'equipment_type' },
+              { title: 'count', dataIndex: 'count', key: 'count', width: 90 },
+              { title: 'total', dataIndex: 'total', key: 'total', width: 120 },
+            ]}
+            dataSource={severeNegativeTypeRows}
+          />
+        </div>
+      )}
+
+      {sensorBiasRows.length > 0 && (
+        <div>
+          <Text strong>疑似传感器偏置点位</Text>
+          <Table<SensorBiasRow>
+            size="small"
+            pagination={false}
+            rowKey="key"
+            style={{ marginTop: 6 }}
+            columns={[{ title: '疑似传感器偏置点位', dataIndex: 'point', key: 'point' }]}
+            dataSource={sensorBiasRows}
           />
         </div>
       )}

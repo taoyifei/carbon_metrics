@@ -1,13 +1,15 @@
 """
-运行稳定性指标计算
+运行稳定性指标计算。
 """
+from __future__ import annotations
+
 from typing import Any, List, Optional, Tuple
 
 from .base import BaseMetric, MetricContext, CalculationResult
 
 
 class _RuntimeRatioMetric(BaseMetric):
-    """运行时长占比基类"""
+    """运行时长占比基类。"""
 
     @property
     def unit(self) -> str:
@@ -23,7 +25,7 @@ class _RuntimeRatioMetric(BaseMetric):
 
     @property
     def _metric_candidates(self) -> List[str]:
-        # 兼容两种命名：runtime（新）/ run_status（历史）
+        # 兼容 runtime（新）与 run_status（历史）
         return ["runtime", "run_status"]
 
     def _resolve_scope(
@@ -36,8 +38,9 @@ class _RuntimeRatioMetric(BaseMetric):
             return self._equipment_type, None
         return None, self._equipment_types
 
-    @staticmethod
+    @classmethod
     def _build_runtime_where(
+        cls,
         ctx: MetricContext,
         metric_name: str,
         equipment_type: Optional[str],
@@ -65,9 +68,11 @@ class _RuntimeRatioMetric(BaseMetric):
         if ctx.equipment_id:
             conditions.append("equipment_id = %s")
             params.append(ctx.equipment_id)
-        if ctx.sub_equipment_id:
-            conditions.append("sub_equipment_id = %s")
-            params.append(ctx.sub_equipment_id)
+        cls._append_sub_equipment_condition(
+            conditions,
+            params,
+            ctx.sub_equipment_id,
+        )
         return " AND ".join(conditions), params
 
     @staticmethod
@@ -84,6 +89,7 @@ class _RuntimeRatioMetric(BaseMetric):
 
     def calculate(self, ctx: MetricContext) -> CalculationResult:
         scope_equipment_type, scope_equipment_types = self._resolve_scope(ctx)
+        clamp_threshold = self._negative_delta_clamp_threshold
 
         try:
             with self.db.cursor() as cursor:
@@ -95,13 +101,50 @@ class _RuntimeRatioMetric(BaseMetric):
                         ctx, metric_name, scope_equipment_type, scope_equipment_types)
                     sql = f"""
                         SELECT
-                            SUM(agg_delta) AS total_runtime,
+                            SUM(
+                                CASE
+                                    WHEN agg_delta < 0 AND agg_delta >= -%s THEN 0
+                                    ELSE agg_delta
+                                END
+                            ) AS total_runtime,
+                            SUM(
+                                CASE
+                                    WHEN agg_delta < 0 AND agg_delta >= -%s THEN agg_delta
+                                    ELSE 0
+                                END
+                            ) AS clamped_negative_total,
+                            SUM(
+                                CASE
+                                    WHEN agg_delta < 0 AND agg_delta >= -%s THEN 1
+                                    ELSE 0
+                                END
+                            ) AS clamped_negative_count,
+                            SUM(
+                                CASE
+                                    WHEN agg_delta < -%s THEN agg_delta
+                                    ELSE 0
+                                END
+                            ) AS severe_negative_total,
+                            SUM(
+                                CASE
+                                    WHEN agg_delta < -%s THEN 1
+                                    ELSE 0
+                                END
+                            ) AS severe_negative_count,
                             COUNT(DISTINCT equipment_id) AS device_count,
                             COUNT(*) AS record_count
                         FROM agg_hour
                         WHERE {where}
                     """
-                    cursor.execute(sql, params)
+                    query_params: List[Any] = [
+                        clamp_threshold,
+                        clamp_threshold,
+                        clamp_threshold,
+                        clamp_threshold,
+                        clamp_threshold,
+                        *params,
+                    ]
+                    cursor.execute(sql, query_params)
                     row = cursor.fetchone()
                     if row and int(row["record_count"] or 0) > 0:
                         selected_metric = metric_name
@@ -115,8 +158,10 @@ class _RuntimeRatioMetric(BaseMetric):
                         equipment_type=scope_equipment_type,
                         equipment_types=scope_equipment_types)
                     return CalculationResult(
-                        metric_name=self.metric_name, value=None,
-                        unit=self.unit, status="no_data",
+                        metric_name=self.metric_name,
+                        value=None,
+                        unit=self.unit,
+                        status="no_data",
                         formula=self.formula,
                         quality_score=0.0,
                         quality_issues=missing_issues,
@@ -129,25 +174,64 @@ class _RuntimeRatioMetric(BaseMetric):
                 period_hours = max(0.0, delta.total_seconds() / 3600)
                 max_runtime = period_hours * device_count
 
-                if max_runtime == 0:
-                    ratio = 0.0
-                else:
-                    ratio = round(total_runtime / max_runtime * 100, 2)
+                ratio = 0.0 if max_runtime == 0 else round(total_runtime / max_runtime * 100, 2)
 
                 quality_score, quality_issues = self._check_quality_from_table(
-                    cursor, ctx, [selected_metric],
+                    cursor,
+                    ctx,
+                    [selected_metric],
                     equipment_type=scope_equipment_type,
-                    equipment_types=scope_equipment_types)
+                    equipment_types=scope_equipment_types,
+                )
 
-                calc_issues = []
+                calc_issues: List[dict[str, Any]] = []
                 if selected_metric != "runtime":
                     calc_issues.append({
                         "type": "fallback_data_source",
                         "description": "runtime 缺失，已回退使用 run_status 增量口径",
                         "details": {"metric_used": selected_metric},
                     })
-                all_issues = quality_issues + calc_issues
 
+                clamped_negative_count = int(selected_row.get("clamped_negative_count") or 0)
+                clamped_negative_total = float(selected_row.get("clamped_negative_total") or 0.0)
+                if clamped_negative_count > 0:
+                    calc_issues.append({
+                        "type": "negative_delta_clamped",
+                        "description": (
+                            f"发现 {clamped_negative_count} 条小负值（阈值: {clamp_threshold}），已按 0 处理"
+                        ),
+                        "count": clamped_negative_count,
+                        "details": {
+                            "clamp_threshold": clamp_threshold,
+                            "clamped_negative_total": round(clamped_negative_total, 2),
+                            "policy": "-threshold <= agg_delta < 0 -> 0",
+                        },
+                    })
+
+                severe_negative_count = int(selected_row.get("severe_negative_count") or 0)
+                severe_negative_total = float(selected_row.get("severe_negative_total") or 0.0)
+                if severe_negative_count > 0:
+                    calc_issues.append({
+                        "type": "negative_delta_alert",
+                        "description": (
+                            f"发现 {severe_negative_count} 条超阈值负值（< -{clamp_threshold}），保留原值并告警"
+                        ),
+                        "count": severe_negative_count,
+                        "details": {
+                            "clamp_threshold": clamp_threshold,
+                            "severe_negative_total": round(severe_negative_total, 2),
+                            "policy": "agg_delta < -threshold -> keep raw",
+                        },
+                    })
+
+                if ratio < 0 or ratio > 100:
+                    calc_issues.append({
+                        "type": "ratio_out_of_range",
+                        "description": "运行时长占比超出 0-100%，已保留真实值并告警",
+                        "details": {"raw_ratio": round(ratio, 2)},
+                    })
+
+                all_issues = quality_issues + calc_issues
                 formula_with_values = (
                     f"= {round(total_runtime, 1)}h"
                     f" / ({round(period_hours, 2)}h × {device_count}台)"
@@ -155,8 +239,10 @@ class _RuntimeRatioMetric(BaseMetric):
                 )
 
                 return CalculationResult(
-                    metric_name=self.metric_name, value=ratio,
-                    unit=self.unit, status=self._status_from_issues(all_issues),
+                    metric_name=self.metric_name,
+                    value=ratio,
+                    unit=self.unit,
+                    status=self._status_from_issues(all_issues),
                     formula=self.formula,
                     formula_with_values=formula_with_values,
                     sql_executed=selected_sql,
@@ -172,8 +258,10 @@ class _RuntimeRatioMetric(BaseMetric):
                 )
         except Exception as e:
             return CalculationResult(
-                metric_name=self.metric_name, value=None,
-                unit=self.unit, status="failed",
+                metric_name=self.metric_name,
+                value=None,
+                unit=self.unit,
+                status="failed",
                 formula=self.formula,
                 quality_issues=[{
                     "type": "error", "description": str(e),
@@ -182,7 +270,7 @@ class _RuntimeRatioMetric(BaseMetric):
 
 
 class ChillerRuntimeRatioMetric(_RuntimeRatioMetric):
-    """冷机运行时长占比"""
+    """冷机运行时长占比。"""
 
     @property
     def metric_name(self) -> str:
@@ -198,7 +286,7 @@ class ChillerRuntimeRatioMetric(_RuntimeRatioMetric):
 
 
 class TowerFanRuntimeRatioMetric(_RuntimeRatioMetric):
-    """风机运行时长占比"""
+    """风机运行时长占比。"""
 
     @property
     def metric_name(self) -> str:

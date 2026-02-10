@@ -2,6 +2,7 @@
 指标计算基类
 定义指标计算的通用接口和数据结构
 """
+import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -51,6 +52,7 @@ class CalculationResult:
 
 class BaseMetric(ABC):
     """指标计算基类"""
+    NULL_SUB_EQUIPMENT_TOKEN = "__NULL__"
 
     def __init__(
         self,
@@ -61,6 +63,153 @@ class BaseMetric(ABC):
         self.db = db
         self._query_cache = query_cache
         self._include_dependency_diagnostics = include_dependency_diagnostics
+        self._negative_delta_clamp_threshold = self._parse_negative_delta_clamp_threshold()
+        self._sensor_bias_blacklist = self._parse_sensor_bias_blacklist()
+        self._sensor_bias_min_negative_count = self._parse_positive_int_env(
+            "SENSOR_BIAS_MIN_NEGATIVE_COUNT",
+            default=20,
+        )
+
+    @staticmethod
+    def _parse_negative_delta_clamp_threshold() -> float:
+        raw = os.getenv("NEGATIVE_DELTA_CLAMP_THRESHOLD", "0.1").strip()
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return 0.1
+        if value < 0:
+            return 0.1
+        return value
+
+    @staticmethod
+    def _parse_positive_int_env(name: str, default: int) -> int:
+        raw = os.getenv(name, str(default)).strip()
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            return default
+        if value <= 0:
+            return default
+        return value
+
+    @staticmethod
+    def _parse_sensor_bias_blacklist() -> List[str]:
+        raw = os.getenv("SENSOR_BIAS_POINT_BLACKLIST", "A3_GYK1113").strip()
+        if not raw:
+            return []
+        points = [item.strip() for item in raw.split(",")]
+        return [item for item in points if item]
+
+    @classmethod
+    def _is_null_sub_equipment_scope(cls, sub_equipment_id: Optional[str]) -> bool:
+        if not sub_equipment_id:
+            return False
+        return sub_equipment_id.strip().upper() == cls.NULL_SUB_EQUIPMENT_TOKEN
+
+    @classmethod
+    def _append_sub_equipment_condition(
+        cls,
+        conditions: List[str],
+        params: List[Any],
+        sub_equipment_id: Optional[str],
+        column_name: str = "sub_equipment_id",
+    ) -> None:
+        if not sub_equipment_id:
+            return
+        if cls._is_null_sub_equipment_scope(sub_equipment_id):
+            conditions.append(f"({column_name} IS NULL OR {column_name} = '')")
+            return
+        conditions.append(f"{column_name} = %s")
+        params.append(sub_equipment_id)
+
+    def _query_sensor_bias_points(
+        self,
+        cursor,
+        ctx: MetricContext,
+        equipment_type: Optional[str] = None,
+        equipment_types: Optional[List[str]] = None,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        if not self._sensor_bias_blacklist:
+            return []
+
+        conditions = [
+            "c.ts >= %s",
+            "c.ts < %s",
+            "c.metric_name = 'power'",
+            "r.source_type = 'device'",
+            "r.device_path IS NOT NULL",
+            "r.device_path <> ''",
+        ]
+        params: List[Any] = [ctx.time_start, ctx.time_end]
+
+        eq_type = equipment_type or ctx.equipment_type
+        if eq_type:
+            conditions.append("c.equipment_type = %s")
+            params.append(eq_type)
+        elif equipment_types:
+            placeholders = ", ".join(["%s"] * len(equipment_types))
+            conditions.append(f"c.equipment_type IN ({placeholders})")
+            params.extend(equipment_types)
+        if ctx.building_id:
+            conditions.append("c.building_id = %s")
+            params.append(ctx.building_id)
+        if ctx.system_id:
+            conditions.append("c.system_id = %s")
+            params.append(ctx.system_id)
+        if ctx.equipment_id:
+            conditions.append("c.equipment_id = %s")
+            params.append(ctx.equipment_id)
+        self._append_sub_equipment_condition(
+            conditions,
+            params,
+            ctx.sub_equipment_id,
+            "c.sub_equipment_id",
+        )
+
+        keyword_conditions: List[str] = []
+        for keyword in self._sensor_bias_blacklist:
+            keyword_conditions.append("r.device_path LIKE %s")
+            params.append(f"%{keyword}%")
+        conditions.append(f"({' OR '.join(keyword_conditions)})")
+
+        where_clause = " AND ".join(conditions)
+        sql = f"""
+            SELECT
+                r.device_path,
+                SUM(CASE WHEN c.value < 0 THEN 1 ELSE 0 END) AS negative_count,
+                COUNT(*) AS total_count,
+                MIN(c.value) AS min_value
+            FROM canonical_measurement c
+            JOIN raw_measurement r
+              ON r.id = c.raw_id
+            WHERE {where_clause}
+            GROUP BY r.device_path
+            HAVING SUM(CASE WHEN c.value < 0 THEN 1 ELSE 0 END) >= %s
+            ORDER BY negative_count DESC, total_count DESC
+            LIMIT %s
+        """
+        rows = self._cached_fetchall(
+            cursor,
+            sql,
+            params + [self._sensor_bias_min_negative_count, limit],
+        )
+
+        points: List[Dict[str, Any]] = []
+        for row in rows:
+            total_count = int(row.get("total_count") or 0)
+            negative_count = int(row.get("negative_count") or 0)
+            if total_count <= 0 or negative_count <= 0:
+                continue
+            points.append({
+                "device_path": str(row.get("device_path") or ""),
+                "negative_count": negative_count,
+                "total_count": total_count,
+                "negative_ratio": round(negative_count / total_count * 100, 2),
+                "min_value": float(row.get("min_value") or 0.0),
+            })
+
+        return points
 
     @property
     @abstractmethod
@@ -109,9 +258,11 @@ class BaseMetric(ABC):
         if ctx.equipment_id:
             conditions.append("equipment_id = %s")
             params.append(ctx.equipment_id)
-        if ctx.sub_equipment_id:
-            conditions.append("sub_equipment_id = %s")
-            params.append(ctx.sub_equipment_id)
+        self._append_sub_equipment_condition(
+            conditions,
+            params,
+            ctx.sub_equipment_id,
+        )
         if extra_conditions:
             conditions.extend(extra_conditions)
 
@@ -173,9 +324,11 @@ class BaseMetric(ABC):
         if ctx.equipment_id:
             conditions.append("equipment_id = %s")
             params.append(ctx.equipment_id)
-        if ctx.sub_equipment_id:
-            conditions.append("sub_equipment_id = %s")
-            params.append(ctx.sub_equipment_id)
+        self._append_sub_equipment_condition(
+            conditions,
+            params,
+            ctx.sub_equipment_id,
+        )
 
         return conditions, params
 
@@ -331,9 +484,11 @@ class BaseMetric(ABC):
         if ctx.equipment_id:
             canonical_scope_conditions.append("equipment_id = %s")
             canonical_scope_params.append(ctx.equipment_id)
-        if ctx.sub_equipment_id:
-            canonical_scope_conditions.append("sub_equipment_id = %s")
-            canonical_scope_params.append(ctx.sub_equipment_id)
+        self._append_sub_equipment_condition(
+            canonical_scope_conditions,
+            canonical_scope_params,
+            ctx.sub_equipment_id,
+        )
 
         canonical_scope_sql = f"""
             SELECT metric_name, COUNT(*) AS cnt
@@ -372,9 +527,11 @@ class BaseMetric(ABC):
         if ctx.equipment_id:
             mapping_conditions.append("equipment_id = %s")
             mapping_params.append(ctx.equipment_id)
-        if ctx.sub_equipment_id:
-            mapping_conditions.append("sub_equipment_id = %s")
-            mapping_params.append(ctx.sub_equipment_id)
+        self._append_sub_equipment_condition(
+            mapping_conditions,
+            mapping_params,
+            ctx.sub_equipment_id,
+        )
 
         mapping_sql = f"""
             SELECT metric_name, COUNT(*) AS cnt
@@ -407,9 +564,12 @@ class BaseMetric(ABC):
         if ctx.equipment_id:
             raw_mapping_conditions.append("pm.equipment_id = %s")
             raw_mapping_params.append(ctx.equipment_id)
-        if ctx.sub_equipment_id:
-            raw_mapping_conditions.append("pm.sub_equipment_id = %s")
-            raw_mapping_params.append(ctx.sub_equipment_id)
+        self._append_sub_equipment_condition(
+            raw_mapping_conditions,
+            raw_mapping_params,
+            ctx.sub_equipment_id,
+            "pm.sub_equipment_id",
+        )
 
         raw_mapped_sql = f"""
             SELECT pm.metric_name, COUNT(*) AS cnt
@@ -531,6 +691,68 @@ class BaseMetric(ABC):
             "details": details,
         }]
 
+    def _query_incomplete_bucket_samples(
+        self,
+        cursor,
+        ctx: MetricContext,
+        metric_names: List[str],
+        equipment_type: Optional[str] = None,
+        equipment_types: Optional[List[str]] = None,
+        limit: int = 200,
+    ) -> Dict[str, Any]:
+        if not metric_names:
+            return {
+                "incomplete_bucket_count": 0,
+                "missing_bucket_samples": [],
+            }
+
+        conditions, params = self._build_scope_conditions(
+            ctx, equipment_type, equipment_types)
+        placeholders = ", ".join(["%s"] * len(metric_names))
+        conditions.append(f"metric_name IN ({placeholders})")
+        where_clause = " AND ".join(conditions)
+
+        sample_sql = f"""
+            SELECT
+                metric_name,
+                bucket_time,
+                expected_samples,
+                actual_samples,
+                completeness_rate
+            FROM agg_hour_quality
+            WHERE {where_clause}
+              AND completeness_rate < 99.9
+            ORDER BY bucket_time ASC, metric_name ASC
+            LIMIT %s
+        """
+        sample_rows = self._cached_fetchall(
+            cursor, sample_sql, params + metric_names + [limit])
+
+        count_sql = f"""
+            SELECT COUNT(*) AS cnt
+            FROM agg_hour_quality
+            WHERE {where_clause}
+              AND completeness_rate < 99.9
+        """
+        count_row = self._cached_fetchone(
+            cursor, count_sql, params + metric_names)
+
+        samples: List[Dict[str, Any]] = []
+        for row in sample_rows:
+            bucket_time = row.get("bucket_time")
+            samples.append({
+                "metric_name": str(row.get("metric_name") or ""),
+                "bucket_time": str(bucket_time) if bucket_time is not None else "",
+                "expected_samples": int(row.get("expected_samples") or 0),
+                "actual_samples": int(row.get("actual_samples") or 0),
+                "completeness_rate": float(row.get("completeness_rate") or 0.0),
+            })
+
+        return {
+            "incomplete_bucket_count": int((count_row or {}).get("cnt") or 0),
+            "missing_bucket_samples": samples,
+        }
+
     def _check_quality_from_table(
         self,
         cursor,
@@ -574,10 +796,21 @@ class BaseMetric(ABC):
 
         issues: List[Dict[str, Any]] = []
         if avg_completeness_rate < 99.9:
+            completeness_details: Dict[str, Any] = {
+                "avg_completeness_rate": round(avg_completeness_rate, 2),
+            }
+            if self._include_dependency_diagnostics:
+                completeness_details.update(self._query_incomplete_bucket_samples(
+                    cursor=cursor,
+                    ctx=ctx,
+                    metric_names=metric_names,
+                    equipment_type=equipment_type,
+                    equipment_types=equipment_types,
+                ))
             issues.append({
                 "type": "completeness",
                 "description": f"平均完整率 {round(avg_completeness_rate, 2)}%",
-                "details": {"avg_completeness_rate": round(avg_completeness_rate, 2)},
+                "details": completeness_details,
             })
         if total_gaps > 0:
             issues.append({
@@ -597,6 +830,25 @@ class BaseMetric(ABC):
                 "description": f"存在 {total_jumps} 个异常跳变",
                 "count": total_jumps,
             })
+
+        if self._include_dependency_diagnostics and "power" in metric_names:
+            sensor_bias_points = self._query_sensor_bias_points(
+                cursor=cursor,
+                ctx=ctx,
+                equipment_type=equipment_type,
+                equipment_types=equipment_types,
+            )
+            if sensor_bias_points:
+                issues.append({
+                    "type": "sensor_bias",
+                    "description": f"发现 {len(sensor_bias_points)} 个疑似传感器偏置点位",
+                    "count": len(sensor_bias_points),
+                    "details": {
+                        "sensor_bias_points": sensor_bias_points,
+                        "blacklist_keywords": self._sensor_bias_blacklist,
+                        "min_negative_count": self._sensor_bias_min_negative_count,
+                    },
+                })
 
         return round(avg_quality_score, 2), issues
 

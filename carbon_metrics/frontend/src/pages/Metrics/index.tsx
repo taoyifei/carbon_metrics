@@ -4,8 +4,13 @@ import { Alert, Button, Card, Empty, Menu, Radio, Space } from 'antd';
 import { ReloadOutlined } from '@ant-design/icons';
 import { METRIC_CATEGORIES } from '../../constants/metricCategories';
 import { getMetricFilterConfig } from '../../constants/metricFilterConfig';
-import { useMetricCalculate, useMetricCoverage } from '../../hooks/useMetrics';
+import {
+  useMetricCalculate,
+  useMetricCalculateBySubScopes,
+  useMetricCoverage,
+} from '../../hooks/useMetrics';
 import { useGlobalTimeRange } from '../../hooks/useGlobalTimeRange';
+import type { MetricResult } from '../../api/types';
 import TimeRangeSelector from '../../components/TimeRangeSelector';
 import FilterBar from '../../components/FilterBar';
 import DataCoverageBanner from '../../components/DataCoverageBanner';
@@ -16,6 +21,26 @@ import QualityIssuesPanel from '../MetricDetail/QualityIssuesPanel';
 import TracePanel from '../MetricDetail/TracePanel';
 import BreakdownTable from '../MetricDetail/BreakdownTable';
 
+type SubEquipmentScope = 'all' | 'main' | 'backup' | 'null';
+
+const SPLIT_SUB_EQUIPMENT_SCOPES = ['main', 'backup', '__NULL__'] as const;
+const SPLIT_SCOPE_LABELS: Record<(typeof SPLIT_SUB_EQUIPMENT_SCOPES)[number], string> = {
+  main: '主机(main)',
+  backup: '备机(backup)',
+  __NULL__: '未区分(null)',
+};
+
+function isValidSubScope(value: string | null): value is SubEquipmentScope {
+  return value === 'all' || value === 'main' || value === 'backup' || value === 'null';
+}
+
+function toSubEquipmentFilter(scope: SubEquipmentScope): string | undefined {
+  if (scope === 'main') return 'main';
+  if (scope === 'backup') return 'backup';
+  if (scope === 'null') return '__NULL__';
+  return undefined;
+}
+
 export default function MetricsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [timeRange, setTimeRange] = useGlobalTimeRange(30);
@@ -23,6 +48,10 @@ export default function MetricsPage() {
   const initCategory = searchParams.get('category') || METRIC_CATEGORIES[0]!.key;
   const initCat = METRIC_CATEGORIES.find((c) => c.key === initCategory) ?? METRIC_CATEGORIES[0]!;
   const initMetric = searchParams.get('metric') || initCat.metrics[0]!;
+  const initSubScopeParam = searchParams.get('sub_scope');
+  const initSubScope: SubEquipmentScope = isValidSubScope(initSubScopeParam)
+    ? initSubScopeParam
+    : 'all';
 
   const [selectedCategory, setSelectedCategory] = useState(initCategory);
   const [selectedMetric, setSelectedMetric] = useState(initMetric);
@@ -30,11 +59,13 @@ export default function MetricsPage() {
   const [systemId, setSystemId] = useState<string | undefined>();
   const [equipmentType, setEquipmentType] = useState<string | undefined>();
   const [equipmentId, setEquipmentId] = useState<string | undefined>();
+  const [subEquipmentScope, setSubEquipmentScope] = useState<SubEquipmentScope>(initSubScope);
 
   const updateSearchParams = (
     category: string,
     metric: string,
     range: [string, string],
+    subScope: SubEquipmentScope,
   ) => {
     setSearchParams(
       {
@@ -42,6 +73,7 @@ export default function MetricsPage() {
         metric,
         time_start: range[0],
         time_end: range[1],
+        sub_scope: subScope,
       },
       { replace: true },
     );
@@ -56,6 +88,10 @@ export default function MetricsPage() {
     () => getMetricFilterConfig(selectedMetric),
     [selectedMetric],
   );
+  const isSplitMode = filterConfig.showSubEquipmentScope && subEquipmentScope === 'all';
+  const subEquipmentIdFilter = filterConfig.showSubEquipmentScope
+    ? toSubEquipmentFilter(subEquipmentScope)
+    : undefined;
 
   const currentFilters = useMemo(
     () => ({
@@ -65,6 +101,7 @@ export default function MetricsPage() {
       system_id: systemId,
       equipment_type: filterConfig.showEquipmentType ? equipmentType : filterConfig.fixedEquipmentType,
       equipment_id: filterConfig.showEquipmentId ? equipmentId : undefined,
+      sub_equipment_id: subEquipmentIdFilter,
     }),
     [
       buildingId,
@@ -73,15 +110,48 @@ export default function MetricsPage() {
       filterConfig.fixedEquipmentType,
       filterConfig.showEquipmentId,
       filterConfig.showEquipmentType,
+      subEquipmentIdFilter,
       systemId,
       timeRange,
     ],
   );
-  const { data, isLoading, error, refetch } = useMetricCalculate(
+
+  const singleMetricQuery = useMetricCalculate(
     selectedMetric,
     currentFilters,
+    !isSplitMode,
+  );
+  const splitMetricQueries = useMetricCalculateBySubScopes(
+    selectedMetric,
+    currentFilters,
+    [...SPLIT_SUB_EQUIPMENT_SCOPES],
+    isSplitMode,
   );
   const metricCoverageQuery = useMetricCoverage(currentFilters);
+
+  const splitErrorRaw = isSplitMode
+    ? splitMetricQueries.find((query) => query.error)?.error
+    : null;
+  const splitError = splitErrorRaw
+    ? (splitErrorRaw instanceof Error
+      ? splitErrorRaw
+      : new Error(String(splitErrorRaw)))
+    : null;
+  const error = isSplitMode ? splitError : (singleMetricQuery.error ?? null);
+  const isLoading = isSplitMode
+    ? splitMetricQueries.some((query) => query.isLoading)
+    : singleMetricQuery.isLoading;
+  const data = isSplitMode ? null : singleMetricQuery.data;
+
+  const handleRefetch = () => {
+    if (isSplitMode) {
+      splitMetricQueries.forEach((query) => {
+        void query.refetch();
+      });
+      return;
+    }
+    void singleMetricQuery.refetch();
+  };
 
   const handleCategoryChange = (key: string) => {
     setSelectedCategory(key);
@@ -89,24 +159,50 @@ export default function MetricsPage() {
     setSelectedMetric(cat.metrics[0]!);
     setEquipmentType(undefined);
     setEquipmentId(undefined);
-    updateSearchParams(key, cat.metrics[0]!, timeRange);
+    setSubEquipmentScope('all');
+    updateSearchParams(key, cat.metrics[0]!, timeRange, 'all');
   };
 
   const handleMetricChange = (metric: string) => {
     setSelectedMetric(metric);
     setEquipmentType(undefined);
     setEquipmentId(undefined);
-    updateSearchParams(selectedCategory, metric, timeRange);
+    setSubEquipmentScope('all');
+    updateSearchParams(selectedCategory, metric, timeRange, 'all');
   };
 
   useEffect(() => {
-    updateSearchParams(selectedCategory, selectedMetric, timeRange);
-  }, [selectedCategory, selectedMetric, timeRange]);
+    updateSearchParams(selectedCategory, selectedMetric, timeRange, subEquipmentScope);
+  }, [selectedCategory, selectedMetric, subEquipmentScope, timeRange]);
 
   const categoryMenuItems = METRIC_CATEGORIES.map((cat) => ({
     key: cat.key,
     label: `${cat.label} (${cat.metrics.length})`,
   }));
+
+  const renderMetricDetail = (result: MetricResult, metricNameOverride?: string) => (
+    <>
+      <MetricResultCard
+        metricName={metricNameOverride ?? result.metric_name}
+        value={result.value}
+        unit={result.unit}
+        status={result.status}
+        qualityScore={result.quality_score}
+      />
+      {result.status === 'no_data' && result.quality_issues.length === 0 && (
+        <Alert
+          style={{ marginTop: 12 }}
+          type="warning"
+          showIcon
+          message="当前条件下没有可用数据"
+          description="请调整时间范围、设备筛选，或检查该指标依赖的数据是否已入库。"
+        />
+      )}
+      <QualityIssuesPanel status={result.status} issues={result.quality_issues} />
+      <TracePanel trace={result.trace} />
+      <BreakdownTable breakdown={result.breakdown} />
+    </>
+  );
 
   return (
     <div style={{ display: 'flex', gap: 16 }}>
@@ -134,16 +230,19 @@ export default function MetricsPage() {
                 onEquipmentTypeChange={setEquipmentType}
                 equipmentId={equipmentId}
                 onEquipmentIdChange={setEquipmentId}
+                subEquipmentScope={subEquipmentScope}
+                onSubEquipmentScopeChange={setSubEquipmentScope}
                 showBuildingId={filterConfig.showBuildingId}
                 showSystemId={filterConfig.showSystemId}
                 showEquipmentType={filterConfig.showEquipmentType}
                 showEquipmentId={filterConfig.showEquipmentId}
+                showSubEquipmentScope={filterConfig.showSubEquipmentScope}
                 fixedEquipmentType={filterConfig.fixedEquipmentType}
               />
               <Button
                 type="primary"
                 icon={<ReloadOutlined />}
-                onClick={() => refetch()}
+                onClick={handleRefetch}
                 loading={isLoading}
               >
                 重新计算
@@ -175,35 +274,40 @@ export default function MetricsPage() {
 
         {error && <ErrorAlert message={error.message} />}
         {isLoading && <LoadingCard />}
-        {data ? (
-          <>
-            <MetricResultCard
-              metricName={data.metric_name}
-              value={data.value}
-              unit={data.unit}
-              status={data.status}
-              qualityScore={data.quality_score}
+
+        {isSplitMode && !isLoading && !error && (
+          <Space direction="vertical" size={16} style={{ width: '100%' }}>
+            <Alert
+              type="info"
+              showIcon
+              message="当前为主备分算模式（全部）"
+              description="已分别计算 主机(main)、备机(backup)、未区分(null) 三组结果。"
             />
-            {data.status === 'no_data' && data.quality_issues.length === 0 && (
-              <Alert
-                style={{ marginTop: 12 }}
-                type="warning"
-                showIcon
-                message="当前条件下没有可用数据"
-                description="请调整时间范围、设备筛选，或检查该指标依赖的数据是否已入库。"
-              />
-            )}
-            <QualityIssuesPanel status={data.status} issues={data.quality_issues} />
-            <TracePanel trace={data.trace} />
-            <BreakdownTable breakdown={data.breakdown} />
-          </>
-        ) : (
-          !isLoading &&
-          !error && (
-            <Card>
-              <Empty description="暂无指标结果，请调整筛选后重试" />
-            </Card>
-          )
+            {SPLIT_SUB_EQUIPMENT_SCOPES.map((scope, idx) => {
+              const result = splitMetricQueries[idx]?.data as MetricResult | undefined;
+              const label = SPLIT_SCOPE_LABELS[scope];
+              if (!result) {
+                return (
+                  <Card key={scope}>
+                    <Empty description={`${label} 暂无可用结果`} />
+                  </Card>
+                );
+              }
+              return (
+                <Card key={scope} size="small" title={label}>
+                  {renderMetricDetail(result, `${result.metric_name} - ${label}`)}
+                </Card>
+              );
+            })}
+          </Space>
+        )}
+
+        {!isSplitMode && data && renderMetricDetail(data)}
+
+        {!isLoading && !error && !data && !isSplitMode && (
+          <Card>
+            <Empty description="暂无指标结果，请调整筛选后重试" />
+          </Card>
         )}
       </div>
     </div>

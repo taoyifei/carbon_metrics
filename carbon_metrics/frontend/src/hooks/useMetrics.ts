@@ -31,6 +31,31 @@ export function useMetricCalculate(
   });
 }
 
+export function useMetricCalculateBySubScopes(
+  metric_name: string,
+  filters: CommonFilters,
+  scopes: Array<'main' | 'backup' | '__NULL__'>,
+  enabled = true,
+) {
+  const baseFilters = {
+    ...filters,
+    sub_equipment_id: undefined,
+  };
+  const ready = enabled && !!metric_name && !!filters.time_start && !!filters.time_end;
+  return useQueries({
+    queries: scopes.map((scope) => ({
+      queryKey: ['metrics', 'calculate', metric_name, baseFilters, scope],
+      queryFn: () =>
+        calculateMetric(metric_name, {
+          ...baseFilters,
+          sub_equipment_id: scope,
+        }),
+      enabled: ready,
+      staleTime: 60 * 1000,
+    })),
+  });
+}
+
 export function useEquipmentIds(equipmentType?: string, enabled = true) {
   return useQuery({
     queryKey: ['equipment', 'ids', equipmentType],

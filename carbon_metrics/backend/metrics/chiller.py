@@ -1,9 +1,12 @@
 """冷机运行效率指标计算"""
-from typing import List, Optional
+import os
+from typing import Any, List, Optional
 
 from .base import BaseMetric, MetricContext, CalculationResult
 
 LOAD_METRIC_CANDIDATES = ["load_rate", "load_ratio"]
+COP_CAPACITY_FACTOR = 4.186 / 3.6
+DEFAULT_COP_MIN_POWER_KW = 20.0
 
 
 def _select_load_metric(metric: BaseMetric, cursor, ctx: MetricContext) -> Optional[str]:
@@ -28,6 +31,26 @@ def _fallback_issues(metric_name_used: str) -> List[dict]:
         "description": "load_rate 缺失，已回退使用 load_ratio",
         "details": {"metric_used": metric_name_used},
     }]
+
+
+def _merge_issues(*groups: List[dict]) -> List[dict]:
+    merged: List[dict] = []
+    for group in groups:
+        if not group:
+            continue
+        merged.extend(group)
+    return merged
+
+
+def _parse_positive_float_env(name: str, default: float) -> float:
+    raw = os.getenv(name, str(default)).strip()
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return default
+    if val <= 0:
+        return default
+    return val
 
 
 class ChillerAvgLoadMetric(BaseMetric):
@@ -277,5 +300,345 @@ class ChillerLoadCvMetric(BaseMetric):
             return CalculationResult(
                 metric_name=self.metric_name, value=None, unit=self.unit,
                 status="failed", formula=self.formula,
+                quality_issues=[{"type": "error", "description": str(e)}],
+            )
+
+
+class ChillerCopMetric(BaseMetric):
+    """冷机COP"""
+
+    @property
+    def metric_name(self) -> str:
+        return "冷机COP"
+
+    @property
+    def unit(self) -> str:
+        return ""
+
+    @property
+    def formula(self) -> str:
+        return (
+            "冷机COP = 制冷量 / 冷机输入功率 = "
+            "冷冻水流量 × (冷冻水回水温度 - 冷冻水供水温度) × 4.186 / 3.6 ÷ 冷机功率"
+        )
+
+    def calculate(self, ctx: MetricContext) -> CalculationResult:
+        min_power_kw = _parse_positive_float_env(
+            "CHILLER_COP_MIN_POWER_KW", DEFAULT_COP_MIN_POWER_KW
+        )
+        water_ctx = MetricContext(
+            time_start=ctx.time_start,
+            time_end=ctx.time_end,
+            building_id=ctx.building_id,
+            system_id=ctx.system_id,
+            equipment_type=ctx.equipment_type,
+            equipment_id=ctx.equipment_id,
+            sub_equipment_id=None,
+        )
+        where_flow, params_flow = self._build_where(water_ctx, "chilled_flow")
+        where_ret, params_ret = self._build_where(water_ctx, "chilled_return_temp")
+        where_sup, params_sup = self._build_where(water_ctx, "chilled_supply_temp")
+
+        power_scope_condition = "(sub_equipment_id IS NULL OR sub_equipment_id = '' OR sub_equipment_id = 'main')"
+        power_scope_text = "sub_equipment_id IN (NULL, '', 'main')"
+        if ctx.sub_equipment_id:
+            scope_value = ctx.sub_equipment_id.strip().lower()
+            if scope_value == "main":
+                power_scope_condition = "sub_equipment_id = 'main'"
+                power_scope_text = "sub_equipment_id = 'main'"
+            elif scope_value == "backup":
+                power_scope_condition = "sub_equipment_id = 'backup'"
+                power_scope_text = "sub_equipment_id = 'backup'"
+            elif self._is_null_sub_equipment_scope(ctx.sub_equipment_id):
+                power_scope_condition = "(sub_equipment_id IS NULL OR sub_equipment_id = '')"
+                power_scope_text = "sub_equipment_id IN (NULL, '')"
+
+        power_ctx = MetricContext(
+            time_start=ctx.time_start,
+            time_end=ctx.time_end,
+            building_id=ctx.building_id,
+            system_id=ctx.system_id,
+            equipment_type=ctx.equipment_type,
+            equipment_id=ctx.equipment_id,
+            sub_equipment_id=None,
+        )
+        where_power, params_power = self._build_where(
+            power_ctx,
+            "power",
+            equipment_type="chiller",
+            extra_conditions=[power_scope_condition],
+        )
+
+        sql = f"""
+            WITH flow_hour AS (
+                SELECT bucket_time, AVG(agg_avg) AS flow_avg, COUNT(*) AS flow_cnt
+                FROM agg_hour
+                WHERE {where_flow}
+                GROUP BY bucket_time
+            ),
+            ret_hour AS (
+                SELECT bucket_time, AVG(agg_avg) AS ret_avg, COUNT(*) AS ret_cnt
+                FROM agg_hour
+                WHERE {where_ret}
+                GROUP BY bucket_time
+            ),
+            sup_hour AS (
+                SELECT bucket_time, AVG(agg_avg) AS sup_avg, COUNT(*) AS sup_cnt
+                FROM agg_hour
+                WHERE {where_sup}
+                GROUP BY bucket_time
+            ),
+            power_hour AS (
+                SELECT
+                    bucket_time,
+                    SUM(agg_avg) AS power_sum_kw,
+                    COUNT(*) AS power_points
+                FROM agg_hour
+                WHERE {where_power}
+                GROUP BY bucket_time
+            )
+            SELECT
+                COUNT(*) AS overlapped_hours,
+                SUM(CASE WHEN ph.power_sum_kw > %s THEN 1 ELSE 0 END) AS active_hours,
+                SUM(
+                    CASE WHEN ph.power_sum_kw > %s
+                    THEN fh.flow_avg * (rh.ret_avg - sh.sup_avg) * %s
+                    ELSE 0 END
+                ) AS cooling_capacity_sum_kw,
+                SUM(CASE WHEN ph.power_sum_kw > %s THEN ph.power_sum_kw ELSE 0 END) AS chiller_power_sum_kw,
+                AVG(fh.flow_avg) AS avg_flow,
+                AVG(rh.ret_avg) AS avg_ret,
+                AVG(sh.sup_avg) AS avg_sup,
+                AVG(ph.power_sum_kw) AS avg_power_kw,
+                MIN(ph.power_sum_kw) AS min_power_kw,
+                MAX(ph.power_sum_kw) AS max_power_kw,
+                SUM(CASE WHEN ph.power_sum_kw <= %s THEN 1 ELSE 0 END) AS low_power_hours,
+                SUM(CASE WHEN (rh.ret_avg - sh.sup_avg) <= 0 THEN 1 ELSE 0 END) AS non_positive_delta_t_hours,
+                SUM(ph.power_points) AS power_points_total
+            FROM flow_hour fh
+            JOIN ret_hour rh ON rh.bucket_time = fh.bucket_time
+            JOIN sup_hour sh ON sh.bucket_time = fh.bucket_time
+            JOIN power_hour ph ON ph.bucket_time = fh.bucket_time
+        """
+
+        try:
+            with self.db.cursor() as cursor:
+                row = self._cached_fetchone(
+                    cursor,
+                    sql,
+                    params_flow
+                    + params_ret
+                    + params_sup
+                    + params_power
+                    + [
+                        min_power_kw,
+                        min_power_kw,
+                        COP_CAPACITY_FACTOR,
+                        min_power_kw,
+                        min_power_kw,
+                    ],
+                )
+
+                has_flow = self._cached_fetchone(
+                    cursor, f"SELECT COUNT(*) AS n FROM agg_hour WHERE {where_flow}", params_flow
+                )
+                has_ret = self._cached_fetchone(
+                    cursor, f"SELECT COUNT(*) AS n FROM agg_hour WHERE {where_ret}", params_ret
+                )
+                has_sup = self._cached_fetchone(
+                    cursor, f"SELECT COUNT(*) AS n FROM agg_hour WHERE {where_sup}", params_sup
+                )
+                has_power = self._cached_fetchone(
+                    cursor, f"SELECT COUNT(*) AS n FROM agg_hour WHERE {where_power}", params_power
+                )
+                has_flow_data = bool(has_flow and int(has_flow["n"] or 0) > 0)
+                has_ret_data = bool(has_ret and int(has_ret["n"] or 0) > 0)
+                has_sup_data = bool(has_sup and int(has_sup["n"] or 0) > 0)
+                has_power_data = bool(has_power and int(has_power["n"] or 0) > 0)
+
+                if not (has_flow_data and has_ret_data and has_sup_data and has_power_data):
+                    missing_issues = _merge_issues(
+                        self._build_missing_dependency_issues(
+                            cursor,
+                            ctx,
+                            ["chilled_flow", "chilled_return_temp", "chilled_supply_temp"],
+                        ) if not (has_flow_data and has_ret_data and has_sup_data) else [],
+                        self._build_missing_dependency_issues(
+                            cursor,
+                            ctx,
+                            ["power"],
+                            equipment_type="chiller",
+                        ) if not has_power_data else [],
+                    )
+                    if not has_power_data:
+                        missing_issues.append({
+                            "type": "missing_main_power",
+                            "description": f"冷机功率口径缺失（当前口径: {power_scope_text}）",
+                            "details": {
+                                "power_scope": f"equipment_type='chiller' AND {power_scope_text}"
+                            },
+                        })
+                    return CalculationResult(
+                        metric_name=self.metric_name,
+                        value=None,
+                        unit=self.unit,
+                        status="no_data",
+                        formula=self.formula,
+                        quality_score=0.0,
+                        quality_issues=missing_issues,
+                    )
+
+                if not row or int(row["overlapped_hours"] or 0) == 0:
+                    return CalculationResult(
+                        metric_name=self.metric_name,
+                        value=None,
+                        unit=self.unit,
+                        status="no_data",
+                        formula=self.formula,
+                        quality_score=0.0,
+                        quality_issues=[{
+                            "type": "time_alignment_gap",
+                            "description": "流量/温度/冷机主功率在当前范围无重叠小时，无法计算COP",
+                        }],
+                    )
+
+                flow_val = float(row["avg_flow"] or 0.0)
+                ret_val = float(row["avg_ret"] or 0.0)
+                sup_val = float(row["avg_sup"] or 0.0)
+                power_val = float(row["avg_power_kw"] or 0.0)
+                cooling_capacity_sum = float(row["cooling_capacity_sum_kw"] or 0.0)
+                chiller_power_sum = float(row["chiller_power_sum_kw"] or 0.0)
+                active_hours = int(row["active_hours"] or 0)
+                overlapped_hours = int(row["overlapped_hours"] or 0)
+                low_power_hours = int(row["low_power_hours"] or 0)
+                non_positive_delta_t_hours = int(row["non_positive_delta_t_hours"] or 0)
+
+                quality_score_system, quality_issues_system = self._check_quality_from_table(
+                    cursor,
+                    ctx,
+                    ["chilled_flow", "chilled_return_temp", "chilled_supply_temp"],
+                )
+                quality_score_power, quality_issues_power = self._check_quality_from_table(
+                    cursor,
+                    ctx,
+                    ["power"],
+                    equipment_type="chiller",
+                )
+
+                total_records = overlapped_hours
+                valid_records = active_hours
+
+                calc_issues: List[dict[str, Any]] = []
+                if low_power_hours > 0:
+                    calc_issues.append({
+                        "type": "low_power_filtered",
+                        "description": (
+                            f"已过滤 {low_power_hours} 个低功率小时（<= {min_power_kw} kW）以避免COP失真"
+                        ),
+                        "count": low_power_hours,
+                        "details": {
+                            "min_power_threshold_kw": min_power_kw,
+                            "overlapped_hours": overlapped_hours,
+                            "active_hours": active_hours,
+                        },
+                    })
+                if non_positive_delta_t_hours > 0:
+                    calc_issues.append({
+                        "type": "non_positive_delta_t",
+                        "description": f"存在 {non_positive_delta_t_hours} 个小时温差<=0，已按真实值参与口径",
+                        "count": non_positive_delta_t_hours,
+                    })
+
+                if abs(chiller_power_sum) < 1e-9:
+                    calc_issues.append({
+                        "type": "zero_denominator",
+                        "description": "有效时段冷机输入功率总和为0，无法计算COP",
+                        "details": {
+                            "avg_chiller_power": round(power_val, 4),
+                            "power_sum_kw": round(chiller_power_sum, 4),
+                            "min_power_threshold_kw": min_power_kw,
+                        },
+                    })
+                    all_issues = _merge_issues(
+                        quality_issues_system, quality_issues_power, calc_issues)
+                    return CalculationResult(
+                        metric_name=self.metric_name,
+                        value=None,
+                        unit=self.unit,
+                        status="partial",
+                        formula=self.formula,
+                        formula_with_values=(
+                            f"= {round(cooling_capacity_sum, 2)} / 0 (有效时段冷机输入功率总和为0)"
+                        ),
+                        sql_executed=sql.strip(),
+                        input_records=total_records,
+                        valid_records=valid_records,
+                        data_source_condition=(
+                            "metric_name IN ('chilled_flow','chilled_return_temp',"
+                            "'chilled_supply_temp') + metric_name='power', equipment_type='chiller', "
+                            f"{power_scope_text}"
+                        ),
+                        quality_score=round((quality_score_system + quality_score_power) / 2, 2),
+                        quality_issues=all_issues,
+                    )
+
+                cop = round(cooling_capacity_sum / chiller_power_sum, 2)
+                if power_val < 0 or chiller_power_sum < 0:
+                    calc_issues.append({
+                        "type": "negative_denominator",
+                        "description": "冷机输入功率为负值，已按真实数据计算COP并告警",
+                        "details": {
+                            "avg_chiller_power": round(power_val, 2),
+                            "power_sum_kw": round(chiller_power_sum, 2),
+                        },
+                    })
+                if cooling_capacity_sum < 0:
+                    calc_issues.append({
+                        "type": "negative_numerator",
+                        "description": "制冷量为负值，已按真实数据计算COP并告警",
+                        "details": {"cooling_capacity_sum_kw": round(cooling_capacity_sum, 2)},
+                    })
+                if cop < 1.0 or cop > 12.0:
+                    calc_issues.append({
+                        "type": "cop_out_of_range",
+                        "description": "COP超出常见运行区间（1-12），请核查功率口径与原始点位",
+                        "details": {
+                            "cop": cop,
+                            "power_sum_kw": round(chiller_power_sum, 2),
+                            "cooling_capacity_sum_kw": round(cooling_capacity_sum, 2),
+                        },
+                    })
+
+                all_issues = _merge_issues(
+                    quality_issues_system, quality_issues_power, calc_issues)
+
+                return CalculationResult(
+                    metric_name=self.metric_name,
+                    value=cop,
+                    unit=self.unit,
+                    status=self._status_from_issues(all_issues),
+                    formula=self.formula,
+                    formula_with_values=(
+                        f"= Σ[流量×(回水-供水)×{round(COP_CAPACITY_FACTOR, 3)}] / Σ[主功率] "
+                        f"= {round(cooling_capacity_sum, 2)} / {round(chiller_power_sum, 2)} = {cop}"
+                    ),
+                    sql_executed=sql.strip(),
+                    input_records=total_records,
+                    valid_records=valid_records,
+                    data_source_condition=(
+                        "metric_name IN ('chilled_flow','chilled_return_temp',"
+                        "'chilled_supply_temp') + metric_name='power', equipment_type='chiller', "
+                        f"{power_scope_text}"
+                    ),
+                    quality_score=round((quality_score_system + quality_score_power) / 2, 2),
+                    quality_issues=all_issues,
+                )
+        except Exception as e:
+            return CalculationResult(
+                metric_name=self.metric_name,
+                value=None,
+                unit=self.unit,
+                status="failed",
+                formula=self.formula,
                 quality_issues=[{"type": "error", "description": str(e)}],
             )

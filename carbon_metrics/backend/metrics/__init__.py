@@ -20,6 +20,7 @@ from .chiller import (
     ChillerAvgLoadMetric,
     ChillerMaxLoadMetric,
     ChillerLoadCvMetric,
+    ChillerCopMetric,
 )
 from .pump import ChilledPumpFrequencyMetric, CoolingPumpFrequencyMetric
 from .tower import CoolingWaterDeltaTMetric, TowerFanPowerMetric
@@ -49,6 +50,7 @@ __all__ = [
     "ChillerAvgLoadMetric",
     "ChillerMaxLoadMetric",
     "ChillerLoadCvMetric",
+    "ChillerCopMetric",
     # 水泵效率
     "ChilledPumpFrequencyMetric",
     "CoolingPumpFrequencyMetric",

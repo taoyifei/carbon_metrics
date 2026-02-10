@@ -2,7 +2,7 @@
 
 `carbon_metrics` 是制冷系统能耗数据平台，包含 **FastAPI 后端** 和 **React 前端** 两部分。
 
-- **后端**：21 个指标计算 + 数据质量查询，基于 FastAPI + PyMySQL。
+- **后端**：23 个指标计算 + 数据质量查询，基于 FastAPI + PyMySQL。
 - **前端**：管理界面，基于 React 18 + TypeScript + Ant Design 5，提供总览、数据质量、指标计算、设备管理四个页面。
 - **数据库**：MySQL `cooling_system_v2`，数据范围 2025-07-01 ~ 2026-01-20，116 台设备（冷机 31 + 水泵 70 + 冷却塔 15）。
 
@@ -32,6 +32,13 @@
 | `/metrics` | 指标分析 | 选择时间范围计算指标，展示结果、公式追溯、质量问题、分解明细 |
 | `/quality`（设备列表 Tab） | 设备管理 | 设备质量列表，支持按类型/等级/粒度筛选 |
 | `/quality/equipment/:equipmentId` | 设备详情 | 单设备质量趋势 |
+
+补充：
+- `指标分析 -> 计算追溯` 显式展示 `主机(main)`、`备机(backup)`、`未区分(null)` 三类口径状态（计入/排除/未限制/按筛选）。
+- 其中 `null` 表示原始点位未拆分主备，属于单通道采集。
+- `指标分析` 筛选栏新增 `主备口径`：
+  - 选择 `全部(主/备/null)` 时，页面会并列输出 `main / backup / null` 三组独立计算结果；
+  - 选择 `main` / `backup` / `null` 时，仅计算对应口径。
 
 ### 1.4 健康与文档
 - 健康检查：`/health`
@@ -83,7 +90,7 @@ src/carbon_metrics/
 │       ├── energy.py           # 4 个能耗指标
 │       ├── temperature.py      # 5 个温度指标
 │       ├── flow.py             # 3 个流量指标
-│       ├── chiller.py          # 3 个冷机指标
+│       ├── chiller.py          # 4 个冷机指标（含冷机COP）
 │       ├── pump.py             # 2 个水泵指标
 │       ├── tower.py            # 2 个冷却塔指标
 │       ├── stability.py        # 2 个稳定性指标
@@ -116,6 +123,12 @@ src/carbon_metrics/
 - 维度：`bucket_time`、`building_id`、`system_id`、`equipment_type`、`equipment_id`、`sub_equipment_id`、`metric_name`
 - 聚合值：`agg_avg`、`agg_min`、`agg_max`、`agg_delta`
 - 质量标记：`quality_flags`
+
+说明：
+- 对能耗占比与运行时长占比类指标，后端使用负值阈值规则（`NEGATIVE_DELTA_CLAMP_THRESHOLD`，默认 `0.1`）：
+  - `-threshold <= agg_delta < 0`：按 `0` 参与求和（视为小噪声）。
+  - `agg_delta < -threshold`：保留真实负值，不归零，并触发告警。
+- 处理痕迹会写入 `quality_issues`（`negative_delta_clamped` / `negative_delta_alert`），便于追溯。
 
 ### 4.2 质量聚合表
 质量接口依赖：
@@ -150,11 +163,18 @@ src/carbon_metrics/
 - `DB_READ_TIMEOUT`：读取超时（秒，正整数）
 - `DB_WRITE_TIMEOUT`：写入超时（秒，正整数）
 - `METRIC_CALC_WORKERS`：指标批量计算并行线程数（1-16，默认 4）
+- `NEGATIVE_DELTA_CLAMP_THRESHOLD`：负增量小噪声归零阈值（浮点数，默认 `0.1`）
+- `SENSOR_BIAS_POINT_BLACKLIST`：传感器偏置黑名单关键词（逗号分隔，默认 `A3_GYK1113`）
+- `SENSOR_BIAS_MIN_NEGATIVE_COUNT`：命中黑名单后触发告警的最小负值条数（默认 `20`）
+- `CHILLER_COP_MIN_POWER_KW`：冷机COP口径中“有效功率小时”下限（默认 `20`，过滤小功率待机噪声）
 
 说明：
 - `DB_PORT` 非法时会回退到 `3306`。
 - 超时变量未配置时保持默认连接行为。
 - `METRIC_CALC_WORKERS=1` 时会走串行计算并启用共享查询缓存；>1 时走并行计算。
+- `NEGATIVE_DELTA_CLAMP_THRESHOLD` 仅用于小负值归零；超过阈值的负值会保留原值并告警。
+- `SENSOR_BIAS_POINT_BLACKLIST` 用于标记重点关注点位，命中后会输出 `sensor_bias` 质量告警。
+- `冷机COP` 分母口径使用冷机主功率（`sub_equipment_id in (NULL,'','main')`），不与 `backup` 混算。
 
 ---
 
@@ -259,6 +279,12 @@ npm run dev
 - `equipment_id`
 - `sub_equipment_id`
 
+`sub_equipment_id` 说明：
+- `main`：仅主机口径
+- `backup`：仅备机口径
+- `__NULL__`：仅未拆分主备（`sub_equipment_id IS NULL OR = ''`）
+- 不传：不按子设备过滤（前端“全部”模式会分别发起 `main / backup / __NULL__` 三路请求）
+
 返回说明（重点）：
 - `quality_issues` 中的 `missing_dependency` 会带 `details.missing_metric_diagnostics`
 - `missing_metric_diagnostics` 可区分：
@@ -266,6 +292,14 @@ npm run dev
   - canonical 有数据但 agg 无数据
   - raw+mapping 有数据但 canonical 无数据
   - mapping 未命中（会附 `unmapped_tag_samples` Top 样本）
+- `quality_issues` 中的 `completeness` 会带：
+  - `details.incomplete_bucket_count`：当前范围完整率不足的时段总数
+  - `details.missing_bucket_samples`：缺失时段样例（含 `metric_name`、`bucket_time`、`actual_samples`、`expected_samples`、`completeness_rate`）
+- `quality_issues` 可能包含：
+  - `negative_delta_clamped`：阈值内小负值已归零（会返回阈值与影响量）
+  - `negative_delta_alert`：超阈值负值已保留真实值并告警
+  - `sensor_bias`：命中黑名单且负值频繁的疑似传感器偏置点位
+  - `ratio_out_of_range`：结果比例超出常规范围（保留真实值）
 
 `/api/metrics/calculate_batch` 请求体参数：
 - `metric_names`（可选，不传则批量计算全部已注册指标）

@@ -53,6 +53,7 @@ def _component_key_for_type(equipment_type: str) -> Optional[str]:
 def _query_energy_by_type(
     db,
     ctx: MetricContext,
+    clamp_threshold: float,
     query_cache: Optional[Dict] = None,
 ) -> Tuple[Optional[List], Optional[str], Optional[str]]:
     """查询按 equipment_type 分组的能耗数据，返回 (rows, sql, error)"""
@@ -75,15 +76,46 @@ def _query_energy_by_type(
     if ctx.equipment_id:
         conditions.append("equipment_id = %s")
         params.append(ctx.equipment_id)
-    if ctx.sub_equipment_id:
-        conditions.append("sub_equipment_id = %s")
-        params.append(ctx.sub_equipment_id)
+    BaseMetric._append_sub_equipment_condition(
+        conditions,
+        params,
+        ctx.sub_equipment_id,
+    )
 
     where_clause = " AND ".join(conditions)
     sql = f"""
         SELECT
             equipment_type,
-            SUM(agg_delta) AS total_energy,
+            SUM(
+                CASE
+                    WHEN agg_delta < 0 AND agg_delta >= -%s THEN 0
+                    ELSE agg_delta
+                END
+            ) AS total_energy,
+            SUM(
+                CASE
+                    WHEN agg_delta < 0 AND agg_delta >= -%s THEN agg_delta
+                    ELSE 0
+                END
+            ) AS clamped_negative_total,
+            SUM(
+                CASE
+                    WHEN agg_delta < 0 AND agg_delta >= -%s THEN 1
+                    ELSE 0
+                END
+            ) AS clamped_negative_count,
+            SUM(
+                CASE
+                    WHEN agg_delta < -%s THEN agg_delta
+                    ELSE 0
+                END
+            ) AS severe_negative_total,
+            SUM(
+                CASE
+                    WHEN agg_delta < -%s THEN 1
+                    ELSE 0
+                END
+            ) AS severe_negative_count,
             COUNT(*) AS record_count
         FROM agg_hour
         WHERE {where_clause}
@@ -91,13 +123,21 @@ def _query_energy_by_type(
     """
 
     try:
-        cache_key = ("energy_by_type", sql.strip(), tuple(str(p) for p in params))
+        query_params: List[Any] = [
+            clamp_threshold,
+            clamp_threshold,
+            clamp_threshold,
+            clamp_threshold,
+            clamp_threshold,
+            *params,
+        ]
+        cache_key = ("energy_by_type", sql.strip(), tuple(str(p) for p in query_params))
         if query_cache is not None and cache_key in query_cache:
             rows = query_cache[cache_key]
             return rows, sql.strip(), None
 
         with db.cursor() as cursor:
-            cursor.execute(sql, params)
+            cursor.execute(sql, query_params)
             rows = cursor.fetchall()
 
         if query_cache is not None:
@@ -107,7 +147,17 @@ def _query_energy_by_type(
         return None, sql.strip(), str(e)
 
 
-def _aggregate_energy(rows) -> Tuple[Dict[str, float], int, List[Dict[str, Any]], Dict[str, float], Dict[str, int], List[str]]:
+def _aggregate_energy(
+    rows,
+) -> Tuple[
+    Dict[str, float],
+    int,
+    List[Dict[str, Any]],
+    Dict[str, float],
+    Dict[str, int],
+    List[str],
+    Dict[str, Any],
+]:
     """聚合能耗数据"""
     type_map: Dict[str, float] = {}
     total_records = 0
@@ -115,11 +165,20 @@ def _aggregate_energy(rows) -> Tuple[Dict[str, float], int, List[Dict[str, Any]]
     component_totals = {rule["key"]: 0.0 for rule in COMPONENT_RULES}
     component_record_counts = {rule["key"]: 0 for rule in COMPONENT_RULES}
     extra_types: List[str] = []
+    clamped_negative_count = 0
+    clamped_negative_total = 0.0
+    severe_negative_count = 0
+    severe_negative_total = 0.0
+    severe_by_type: List[Dict[str, Any]] = []
 
     for row in rows:
         eq_type = row["equipment_type"]
         energy = float(row["total_energy"] or 0)
         records = int(row["record_count"] or 0)
+        clamped_count = int(row.get("clamped_negative_count") or 0)
+        clamped_total = float(row.get("clamped_negative_total") or 0.0)
+        severe_count = int(row.get("severe_negative_count") or 0)
+        severe_total = float(row.get("severe_negative_total") or 0.0)
 
         type_map[eq_type] = energy
         total_records += records
@@ -136,6 +195,30 @@ def _aggregate_energy(rows) -> Tuple[Dict[str, float], int, List[Dict[str, Any]]
         else:
             extra_types.append(eq_type)
 
+        clamped_negative_count += clamped_count
+        clamped_negative_total += clamped_total
+        severe_negative_count += severe_count
+        severe_negative_total += severe_total
+        if severe_count > 0:
+            severe_by_type.append({
+                "equipment_type": eq_type,
+                "count": severe_count,
+                "total": round(severe_total, 2),
+            })
+
+    severe_by_type = sorted(
+        severe_by_type,
+        key=lambda item: abs(float(item["total"])),
+        reverse=True,
+    )
+    negative_summary = {
+        "clamped_negative_count": clamped_negative_count,
+        "clamped_negative_total": round(clamped_negative_total, 2),
+        "severe_negative_count": severe_negative_count,
+        "severe_negative_total": round(severe_negative_total, 2),
+        "severe_negative_by_type": severe_by_type[:10],
+    }
+
     return (
         type_map,
         total_records,
@@ -143,7 +226,51 @@ def _aggregate_energy(rows) -> Tuple[Dict[str, float], int, List[Dict[str, Any]]
         component_totals,
         component_record_counts,
         sorted(set(extra_types)),
+        negative_summary,
     )
+
+
+def _build_negative_delta_issues(
+    negative_summary: Dict[str, Any],
+    clamp_threshold: float,
+) -> List[Dict[str, Any]]:
+    issues: List[Dict[str, Any]] = []
+    clamped_count = int(negative_summary.get("clamped_negative_count") or 0)
+    clamped_total = float(negative_summary.get("clamped_negative_total") or 0.0)
+    severe_count = int(negative_summary.get("severe_negative_count") or 0)
+    severe_total = float(negative_summary.get("severe_negative_total") or 0.0)
+    severe_by_type = negative_summary.get("severe_negative_by_type") or []
+
+    if clamped_count > 0:
+        issues.append({
+            "type": "negative_delta_clamped",
+            "description": (
+                f"发现 {clamped_count} 条小负值（阈值: {clamp_threshold}），已按 0 处理"
+            ),
+            "count": clamped_count,
+            "details": {
+                "clamp_threshold": clamp_threshold,
+                "clamped_negative_total": round(clamped_total, 2),
+                "policy": "-threshold <= agg_delta < 0 -> 0",
+            },
+        })
+
+    if severe_count > 0:
+        issues.append({
+            "type": "negative_delta_alert",
+            "description": (
+                f"发现 {severe_count} 条超阈值负值（< -{clamp_threshold}），保留原值并告警"
+            ),
+            "count": severe_count,
+            "details": {
+                "clamp_threshold": clamp_threshold,
+                "severe_negative_total": round(severe_total, 2),
+                "severe_negative_by_type": severe_by_type,
+                "policy": "agg_delta < -threshold -> keep raw",
+            },
+        })
+
+    return issues
 
 
 class TotalEnergyMetric(BaseMetric):
@@ -223,7 +350,13 @@ class TotalEnergyMetric(BaseMetric):
         )
 
     def calculate(self, ctx: MetricContext) -> CalculationResult:
-        rows, sql, error = _query_energy_by_type(self.db, ctx, self._query_cache)
+        clamp_threshold = self._negative_delta_clamp_threshold
+        rows, sql, error = _query_energy_by_type(
+            self.db,
+            ctx,
+            clamp_threshold=clamp_threshold,
+            query_cache=self._query_cache,
+        )
 
         if error:
             return CalculationResult(
@@ -253,6 +386,7 @@ class TotalEnergyMetric(BaseMetric):
                 component_totals,
                 component_record_counts,
                 extra_types,
+                negative_summary,
             ) = _aggregate_energy(rows)
 
             quality_score, quality_issues = self._check_quality_from_table(
@@ -328,6 +462,11 @@ class TotalEnergyMetric(BaseMetric):
                 values_str = " + ".join([f"{b['value']}" for b in breakdown])
                 formula_with_values = f"= {values_str} = {total}"
 
+            component_issues.extend(_build_negative_delta_issues(
+                negative_summary=negative_summary,
+                clamp_threshold=clamp_threshold,
+            ))
+
             all_issues = quality_issues + component_issues
             status = "partial" if all_issues else "success"
 
@@ -365,7 +504,13 @@ class _EnergyRatioBase(BaseMetric):
         raise NotImplementedError
 
     def calculate(self, ctx: MetricContext) -> CalculationResult:
-        rows, sql, error = _query_energy_by_type(self.db, ctx, self._query_cache)
+        clamp_threshold = self._negative_delta_clamp_threshold
+        rows, sql, error = _query_energy_by_type(
+            self.db,
+            ctx,
+            clamp_threshold=clamp_threshold,
+            query_cache=self._query_cache,
+        )
 
         if error:
             return CalculationResult(
@@ -394,6 +539,7 @@ class _EnergyRatioBase(BaseMetric):
                 component_totals,
                 component_record_counts,
                 extra_types,
+                negative_summary,
             ) = _aggregate_energy(rows)
 
             total = round(sum(component_totals.values()), 2) if not ctx.equipment_type else round(sum(type_map.values()), 2)
@@ -422,6 +568,11 @@ class _EnergyRatioBase(BaseMetric):
                         "description": "存在未纳入分母口径的设备类型",
                         "details": {"excluded_equipment_types": extra_types},
                     })
+
+            calc_issues.extend(_build_negative_delta_issues(
+                negative_summary=negative_summary,
+                clamp_threshold=clamp_threshold,
+            ))
 
             if total == 0:
                 all_issues = quality_issues + calc_issues + [{

@@ -30,6 +30,7 @@ from ..metrics.chiller import (
     ChillerAvgLoadMetric,
     ChillerMaxLoadMetric,
     ChillerLoadCvMetric,
+    ChillerCopMetric,
 )
 from ..metrics.pump import ChilledPumpFrequencyMetric, CoolingPumpFrequencyMetric
 from ..metrics.tower import CoolingWaterDeltaTMetric, TowerFanPowerMetric
@@ -85,6 +86,7 @@ class MetricCalculator:
         "冷机平均负载率": ChillerAvgLoadMetric,
         "冷机最大负载率": ChillerMaxLoadMetric,
         "冷机负载波动系数": ChillerLoadCvMetric,
+        "冷机COP": ChillerCopMetric,
         # 水泵效率
         "冷冻泵工作频率": ChilledPumpFrequencyMetric,
         "冷却泵工作频率": CoolingPumpFrequencyMetric,
@@ -169,6 +171,7 @@ class MetricCalculator:
                 ("system_id", system_id),
                 ("equipment_type", equipment_type),
                 ("equipment_id", equipment_id),
+                ("sub_equipment_id", sub_equipment_id),
             ] if v
         )
         if log_result:
@@ -285,9 +288,11 @@ class MetricCalculator:
         if equipment_id:
             conditions.append("equipment_id = %s")
             params.append(equipment_id)
-        if sub_equipment_id:
-            conditions.append("sub_equipment_id = %s")
-            params.append(sub_equipment_id)
+        BaseMetric._append_sub_equipment_condition(
+            conditions,
+            params,
+            sub_equipment_id,
+        )
 
         where_clause = " AND ".join(conditions)
         sql = f"""

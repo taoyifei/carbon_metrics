@@ -32,10 +32,13 @@ interface Props {
   onEquipmentTypeChange?: (v: string | undefined) => void;
   equipmentId?: string;
   onEquipmentIdChange?: (v: string | undefined) => void;
+  subEquipmentScope?: 'all' | 'main' | 'backup' | 'null';
+  onSubEquipmentScopeChange?: (v: 'all' | 'main' | 'backup' | 'null') => void;
   showBuildingId?: boolean;
   showSystemId?: boolean;
   showEquipmentType?: boolean;
   showEquipmentId?: boolean;
+  showSubEquipmentScope?: boolean;
   /** 固定设备类型（只读显示） */
   fixedEquipmentType?: string;
   qualityLevel?: QualityLevel;
@@ -55,10 +58,13 @@ export default function FilterBar({
   onEquipmentTypeChange,
   equipmentId,
   onEquipmentIdChange,
+  subEquipmentScope,
+  onSubEquipmentScopeChange,
   showBuildingId = false,
   showSystemId = false,
   showEquipmentType = true,
   showEquipmentId = false,
+  showSubEquipmentScope = false,
   fixedEquipmentType,
   qualityLevel,
   onQualityLevelChange,
@@ -142,6 +148,22 @@ export default function FilterBar({
             onEquipmentIdChange?.(v === '' ? undefined : v)
           }
           options={equipmentIdOptions}
+        />
+      )}
+      {showSubEquipmentScope && (
+        <Select
+          placeholder="主备口径"
+          style={{ width: 180 }}
+          value={subEquipmentScope ?? 'all'}
+          onChange={(v: 'all' | 'main' | 'backup' | 'null') =>
+            onSubEquipmentScopeChange?.(v)
+          }
+          options={[
+            { value: 'all', label: '全部(主/备/null)' },
+            { value: 'main', label: '主机(main)' },
+            { value: 'backup', label: '备机(backup)' },
+            { value: 'null', label: '未区分(null)' },
+          ]}
         />
       )}
       {showQualityLevel && (

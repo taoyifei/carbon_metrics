@@ -12,7 +12,7 @@ interface Props {
   errorMessage?: string;
 }
 
-const MAX_ITEMS = 8;
+const MAX_ITEMS = 30;
 
 type CoverageStatus = 'success' | 'partial' | 'no_data' | 'failed';
 

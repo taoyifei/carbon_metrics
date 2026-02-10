@@ -152,9 +152,11 @@ class TowerFanPowerMetric(BaseMetric):
         if ctx.equipment_id:
             conditions.append("equipment_id = %s")
             params.append(ctx.equipment_id)
-        if ctx.sub_equipment_id:
-            conditions.append("sub_equipment_id = %s")
-            params.append(ctx.sub_equipment_id)
+        self._append_sub_equipment_condition(
+            conditions,
+            params,
+            ctx.sub_equipment_id,
+        )
 
         where = " AND ".join(conditions)
 

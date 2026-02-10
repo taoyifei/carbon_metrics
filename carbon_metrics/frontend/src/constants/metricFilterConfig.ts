@@ -7,6 +7,7 @@ export interface MetricFilterConfig {
   showSystemId: boolean;
   showEquipmentType: boolean;
   showEquipmentId: boolean;
+  showSubEquipmentScope: boolean;
   /** 固定设备类型（不可更改），如 'chiller' */
   fixedEquipmentType?: string;
 }
@@ -16,6 +17,7 @@ const FULL_FILTER: MetricFilterConfig = {
   showSystemId: true,
   showEquipmentType: true,
   showEquipmentId: true,
+  showSubEquipmentScope: false,
 };
 
 const SYSTEM_ONLY: MetricFilterConfig = {
@@ -23,15 +25,24 @@ const SYSTEM_ONLY: MetricFilterConfig = {
   showSystemId: true,
   showEquipmentType: false,
   showEquipmentId: false,
+  showSubEquipmentScope: false,
 };
 
-function fixedType(type: string): MetricFilterConfig {
+function fixedType(type: string, showSubEquipmentScope = false): MetricFilterConfig {
   return {
     showBuildingId: true,
     showSystemId: true,
     showEquipmentType: false,
     showEquipmentId: true,
+    showSubEquipmentScope,
     fixedEquipmentType: type,
+  };
+}
+
+function withSubScope(base: MetricFilterConfig): MetricFilterConfig {
+  return {
+    ...base,
+    showSubEquipmentScope: true,
   };
 }
 
@@ -58,9 +69,10 @@ export const METRIC_FILTER_CONFIG: Record<string, MetricFilterConfig> = {
   '制冷量': SYSTEM_ONLY,
 
   // 冷机效率
-  '冷机平均负载率': fixedType('chiller'),
-  '冷机最大负载率': fixedType('chiller'),
-  '冷机负载波动系数': fixedType('chiller'),
+  '冷机平均负载率': fixedType('chiller', true),
+  '冷机最大负载率': fixedType('chiller', true),
+  '冷机负载波动系数': fixedType('chiller', true),
+  '冷机COP': withSubScope(SYSTEM_ONLY),
 
   // 水泵效率
   '冷冻泵工作频率': fixedType('chilled_pump'),
@@ -72,12 +84,12 @@ export const METRIC_FILTER_CONFIG: Record<string, MetricFilterConfig> = {
   '冷却塔风机功率': FULL_FILTER,
 
   // 运行稳定性
-  '冷机运行时长占比': fixedType('chiller'),
+  '冷机运行时长占比': fixedType('chiller', true),
   // 不固定设备类型，允许 tower_fan / cooling_tower / cooling_tower_closed 口径
   '风机运行时长占比': FULL_FILTER,
 
   // 预测性维护
-  '过载风险指数': fixedType('chiller'),
+  '过载风险指数': fixedType('chiller', true),
 };
 
 /** 获取指标的筛选配置，未配置的默认全部显示 */

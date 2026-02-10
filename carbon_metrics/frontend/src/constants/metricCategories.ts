@@ -29,7 +29,7 @@ export const METRIC_CATEGORIES: MetricCategory[] = [
   {
     key: 'chiller',
     label: '冷机效率',
-    metrics: ['冷机平均负载率', '冷机最大负载率', '冷机负载波动系数'],
+    metrics: ['冷机平均负载率', '冷机最大负载率', '冷机负载波动系数', '冷机COP'],
   },
   {
     key: 'pump',
