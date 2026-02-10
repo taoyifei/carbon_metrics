@@ -29,9 +29,9 @@
 |------|------|------|
 | `/` | Dashboard 总览 | 质量概览卡片 + 指标分类卡片 |
 | `/quality` | 数据质量 | 4 个 Tab：质量汇总、质量明细、异常问题、原始报告 |
-| `/metrics/:metricName` | 指标详情 | 选择时间范围计算指标，展示结果、公式追溯、质量问题、分解明细 |
-| `/equipment` | 设备管理 | 设备质量列表，支持按类型/等级/粒度筛选 |
-| `/equipment/:equipmentId` | 设备详情 | 单设备质量趋势 |
+| `/metrics` | 指标分析 | 选择时间范围计算指标，展示结果、公式追溯、质量问题、分解明细 |
+| `/quality`（设备列表 Tab） | 设备管理 | 设备质量列表，支持按类型/等级/粒度筛选 |
+| `/quality/equipment/:equipmentId` | 设备详情 | 单设备质量趋势 |
 
 ### 1.4 健康与文档
 - 健康检查：`/health`
@@ -163,23 +163,34 @@ src/carbon_metrics/
 ### 6.1 后端依赖
 
 ```powershell
-pip install fastapi uvicorn pymysql pydantic
+pip install -r carbon_metrics/requirements.txt
+```
+
+如果你当前就在 `carbon_metrics/` 目录内，可改用：
+
+```powershell
+pip install -r requirements.txt
 ```
 
 ### 6.2 前端依赖
 
 ```powershell
-cd src/carbon_metrics/frontend
+cd carbon_metrics/frontend
 npm install
 ```
 
 ### 6.3 启动后端
 
-推荐从 `src` 目录启动：
+推荐在包含 `carbon_metrics/` 目录的仓库根目录启动：
 
 ```powershell
-cd src
 uvicorn carbon_metrics.backend.main:app --reload
+```
+
+如果你当前就在 `carbon_metrics/` 目录内，可改用：
+
+```powershell
+uvicorn backend.main:app --reload
 ```
 
 启动后访问：
@@ -189,7 +200,7 @@ uvicorn carbon_metrics.backend.main:app --reload
 ### 6.4 启动前端
 
 ```powershell
-cd src/carbon_metrics/frontend
+cd carbon_metrics/frontend
 npm run dev
 ```
 
@@ -200,9 +211,31 @@ npm run dev
 ### 6.5 构建前端
 
 ```powershell
-cd src/carbon_metrics/frontend
+cd carbon_metrics/frontend
 npm run build
 ```
+
+### 6.6 局域网访问（不暴露公网）
+
+后端：
+
+```powershell
+uvicorn carbon_metrics.backend.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+前端（已在 `vite.config.ts` 配置 `host: '0.0.0.0'`）：
+
+```powershell
+cd carbon_metrics/frontend
+npm run dev
+```
+
+局域网其他设备访问：
+- 前端：`http://<你的局域网IP>:5173`
+- 后端文档：`http://<你的局域网IP>:8000/docs`
+
+注意：
+- 需要放行本机防火墙端口 `5173`、`8000`。
 
 ---
 
