@@ -327,18 +327,24 @@ class MetricCalculator:
         metrics_to_check = metric_names or self.list_metrics()
         items: List[Dict[str, Any]] = []
         missing_counter: Counter[str] = Counter()
-        results = self.calculate_batch(
-            metric_names=metrics_to_check,
-            time_start=time_start,
-            time_end=time_end,
-            building_id=building_id,
-            system_id=system_id,
-            equipment_type=equipment_type,
-            equipment_id=equipment_id,
-            sub_equipment_id=sub_equipment_id,
-            log_result=False,
-            include_dependency_diagnostics=False,
-        )
+        # Step 1 优化: 串行计算 + 共享缓存，相同 SQL 只查一次
+        shared_cache: Dict[str, Any] = {}
+        results = [
+            self.calculate(
+                metric_name=name,
+                time_start=time_start,
+                time_end=time_end,
+                building_id=building_id,
+                system_id=system_id,
+                equipment_type=equipment_type,
+                equipment_id=equipment_id,
+                sub_equipment_id=sub_equipment_id,
+                log_result=False,
+                query_cache=shared_cache,
+                include_dependency_diagnostics=False,
+            )
+            for name in metrics_to_check
+        ]
 
         for metric_name, result in zip(metrics_to_check, results):
             missing_dependencies = self._extract_missing_dependencies(result)
@@ -369,15 +375,12 @@ class MetricCalculator:
         calculable_count = success_count + partial_count
         calculable_rate = round((calculable_count / total) * 100, 2) if total else 0.0
 
-        available_metric_counts = self._query_available_metric_counts(
-            time_start=time_start,
-            time_end=time_end,
-            building_id=building_id,
-            system_id=system_id,
-            equipment_type=equipment_type,
-            equipment_id=equipment_id,
-            sub_equipment_id=sub_equipment_id,
-        )
+        # Step 3 优化: 从已计算结果中提取，省掉全表 GROUP BY 查询
+        available_metric_counts = {
+            item["metric_name"]: item["input_records"]
+            for item in items
+            if item["input_records"] > 0
+        }
 
         return {
             "time_start": time_start,
