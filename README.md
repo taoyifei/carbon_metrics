@@ -1,4 +1,4 @@
-﻿# carbon_metrics
+# carbon_metrics
 
 `carbon_metrics` 是制冷系统能耗数据平台，包含 **FastAPI 后端** 和 **React 前端** 两部分。
 
@@ -39,6 +39,7 @@
 - `指标分析` 筛选栏新增 `主备口径`：
   - 选择 `全部(主/备/null)` 时，页面会并列输出 `main / backup / null` 三组独立计算结果；
   - 选择 `main` / `backup` / `null` 时，仅计算对应口径。
+- `指标分析 -> 质量问题 -> 缺失时段样例` 默认按 `metric_name + bucket_time` 聚合展示；可切换“查看设备明细”查看设备维度明细行，避免把同一小时多设备误解为时间异常。
 
 ### 1.4 健康与文档
 - 健康检查：`/health`
@@ -130,14 +131,17 @@ src/
 
 说明：
 - 对能耗占比与运行时长占比类指标，后端使用负值阈值规则（`NEGATIVE_DELTA_CLAMP_THRESHOLD`，默认 `0.1`）：
-  - `-threshold <= agg_delta < 0`：按 `0` 参与求和（视为小噪声）。
-  - `agg_delta < -threshold`：保留真实负值，不归零，并触发告警。
-- 处理痕迹会写入 `quality_issues`（`negative_delta_clamped` / `negative_delta_alert`），便于追溯。
+  - `-threshold <= agg_delta < 0`：按 `0` 参与求和（视为小噪声，剔除出 SUM）。
+  - `agg_delta < -threshold`：同样剔除出 SUM，并额外触发告警。
+- 处理痕迹会写入 `quality_issues`（`negative_delta_clamped` / `negative_delta_alert` / `result_beautified`），便于追溯“净化口径”影响。
 
 ### 4.2 质量聚合表
 质量接口依赖：
 - `agg_hour_quality`
 - `agg_day_quality`
+- 完整率问题明细字段：
+  - `missing_bucket_samples`：按小时聚合后的缺失样例（默认展示）
+  - `missing_bucket_device_samples`：设备维度缺失样例（明细开关展示）
 
 可参考建表脚本：
 - `norm/create_sql/database_v2_2.sql`
@@ -176,7 +180,7 @@ src/
 - `DB_PORT` 非法时会回退到 `3306`。
 - 超时变量未配置时保持默认连接行为。
 - `METRIC_CALC_WORKERS=1` 时会走串行计算并启用共享查询缓存；>1 时走并行计算。
-- `NEGATIVE_DELTA_CLAMP_THRESHOLD` 仅用于小负值归零；超过阈值的负值会保留原值并告警。
+- `NEGATIVE_DELTA_CLAMP_THRESHOLD` 用于区分小负值与严重负值；两者都会从 SUM 中剔除，严重负值会额外告警。
 - `SENSOR_BIAS_POINT_BLACKLIST` 用于标记重点关注点位，命中后会输出 `sensor_bias` 质量告警。
 - `冷机COP` 分母口径使用冷机主功率（`sub_equipment_id in (NULL,'','main')`），不与 `backup` 混算。
 
@@ -221,6 +225,41 @@ uvicorn backend.main:app --reload
 启动后访问：
 - Swagger: `http://127.0.0.1:8000/docs`
 - 健康检查: `http://127.0.0.1:8000/health`
+
+### 6.3.1 切换数据库（推荐做法）
+
+后端只通过环境变量读取数据库连接信息。切换数据库时，不需要改代码，按以下顺序执行：
+
+1. 在当前终端设置新的连接参数（PowerShell）：
+
+```powershell
+$env:DB_HOST="127.0.0.1"
+$env:DB_PORT="3306"
+$env:DB_USER="root"
+$env:DB_PASSWORD="你的密码"
+$env:DB_NAME="cooling_system_v2"
+```
+
+2. 在同一个终端启动后端（让新变量生效）：
+
+```powershell
+cd src
+uvicorn carbon_metrics.backend.main:app --reload
+```
+
+3. 快速验证是否连到目标库：
+
+```powershell
+curl "http://127.0.0.1:8000/health"
+curl "http://127.0.0.1:8000/api/metrics/list"
+```
+
+4. 需要切到另一个库时，重复第 1 步并重启后端。
+
+说明：
+- 变量只对“当前终端会话”生效；开新终端后需要重新设置。
+- 不要把真实密码写进仓库文件或提交到 Git。
+- 如果日志出现 `Access denied ... (using password: NO)`，说明当前进程没读到 `DB_PASSWORD`，请在同一终端重新设置后重启后端。
 
 ### 6.4 启动前端
 
@@ -300,10 +339,12 @@ npm run dev
   - mapping 未命中（会附 `unmapped_tag_samples` Top 样本）
 - `quality_issues` 中的 `completeness` 会带：
   - `details.incomplete_bucket_count`：当前范围完整率不足的时段总数
-  - `details.missing_bucket_samples`：缺失时段样例（含 `metric_name`、`bucket_time`、`actual_samples`、`expected_samples`、`completeness_rate`）
+  - `details.missing_bucket_samples`：按小时聚合后的缺失样例（含 `metric_name`、`bucket_time`、`actual_samples`、`expected_samples`、`completeness_rate`）
+  - `details.missing_bucket_device_samples`：设备维度缺失样例（含 `building_id`、`system_id`、`equipment_type`、`equipment_id`、`sub_equipment_id`）
 - `quality_issues` 可能包含：
-  - `negative_delta_clamped`：阈值内小负值已归零（会返回阈值与影响量）
-  - `negative_delta_alert`：超阈值负值已保留真实值并告警
+  - `negative_delta_clamped`：阈值内小负值已从 SUM 剔除（会返回阈值与影响量）
+  - `negative_delta_alert`：超阈值负值已从 SUM 剔除并告警
+  - `result_beautified`：结果使用“净化口径”（负值不进 SUM），会返回被剔除负值总量
   - `sensor_bias`：命中黑名单且负值频繁的疑似传感器偏置点位
   - `ratio_out_of_range`：结果比例超出常规范围（保留真实值）
 
