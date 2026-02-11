@@ -357,6 +357,8 @@ npm run dev
 - `summary`：可计算率与状态分布
 - `items[].input_records` / `items[].valid_records`：每个指标的取数样本
 - `items[].issue_types`：指标命中的质量问题类型
+- `available_metric_counts`：原子指标覆盖计数（如 `energy` / `power`）
+- `metric_input_counts`：业务指标输入记录计数（如 `系统总电量` / `冷机COP`）
 - `missing_dependency_counts`：缺失依赖频次（用于前端 Top 风险提示）
 
 ### 7.2 质量 API
