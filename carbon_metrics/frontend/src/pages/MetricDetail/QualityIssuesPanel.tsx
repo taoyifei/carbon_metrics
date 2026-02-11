@@ -1,5 +1,5 @@
-﻿import type { ReactNode } from 'react';
-import { Alert, Card, Space, Table, Typography } from 'antd';
+import { useState, type ReactNode } from 'react';
+import { Alert, Card, Space, Switch, Table, Typography } from 'antd';
 import type { MetricStatus, QualityIssue } from '../../api/types';
 
 interface Props {
@@ -40,6 +40,20 @@ interface MissingBucketRow {
   key: string;
   metric_name: string;
   bucket_time: string;
+  expected_samples: number;
+  actual_samples: number;
+  completeness_rate: number;
+}
+
+interface MissingBucketDeviceRow {
+  key: string;
+  metric_name: string;
+  bucket_time: string;
+  building_id: string;
+  system_id: string;
+  equipment_type: string;
+  equipment_id: string;
+  sub_equipment_id: string;
   expected_samples: number;
   actual_samples: number;
   completeness_rate: number;
@@ -228,6 +242,34 @@ function buildMissingBucketRows(details: Record<string, unknown>): MissingBucket
     .filter((item): item is MissingBucketRow => item !== null);
 }
 
+function buildMissingBucketDeviceRows(details: Record<string, unknown>): MissingBucketDeviceRow[] {
+  const raw = details.missing_bucket_device_samples;
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+
+  return raw
+    .map((item, index) => {
+      if (!isRecord(item)) {
+        return null;
+      }
+      return {
+        key: `${String(item.metric_name ?? '')}-${String(item.bucket_time ?? '')}-${String(item.equipment_id ?? '')}-${index}`,
+        metric_name: String(item.metric_name ?? ''),
+        bucket_time: String(item.bucket_time ?? ''),
+        building_id: String(item.building_id ?? ''),
+        system_id: String(item.system_id ?? ''),
+        equipment_type: String(item.equipment_type ?? ''),
+        equipment_id: String(item.equipment_id ?? ''),
+        sub_equipment_id: String(item.sub_equipment_id ?? ''),
+        expected_samples: toSafeNumber(item.expected_samples),
+        actual_samples: toSafeNumber(item.actual_samples),
+        completeness_rate: toSafeNumber(item.completeness_rate),
+      };
+    })
+    .filter((item): item is MissingBucketDeviceRow => item !== null);
+}
+
 function buildSevereNegativeTypeRows(details: Record<string, unknown>): SevereNegativeTypeRow[] {
   const raw = details.severe_negative_by_type;
   if (!Array.isArray(raw)) {
@@ -275,7 +317,8 @@ function buildSensorBiasRows(details: Record<string, unknown>): SensorBiasRow[] 
     .filter((item): item is SensorBiasRow => item !== null);
 }
 
-function getIssueDetailBlock(issue: QualityIssue): ReactNode {
+function IssueDetailBlock({ issue }: { issue: QualityIssue }): ReactNode {
+  const [showDeviceDetails, setShowDeviceDetails] = useState(false);
   const details = isRecord(issue.details) ? issue.details : undefined;
   const lines: string[] = [];
 
@@ -284,11 +327,6 @@ function getIssueDetailBlock(issue: QualityIssue): ReactNode {
   }
 
   if (details) {
-    const missingBucketSamples = toStringArray(details.missing_bucket_samples);
-    if (missingBucketSamples.length > 0) {
-      lines.push(`缺失时段样例: ${missingBucketSamples.slice(0, 5).join(' | ')}`);
-    }
-
     const excludedTypes = toStringArray(details.excluded_equipment_types);
     if (excludedTypes.length > 0) {
       lines.push(`未纳入口径设备类型: ${excludedTypes.join(', ')}`);
@@ -312,7 +350,11 @@ function getIssueDetailBlock(issue: QualityIssue): ReactNode {
     }
 
     if (typeof details.severe_negative_total === 'number') {
-      lines.push(`超阈值负值合计(保留原值): ${details.severe_negative_total}`);
+      lines.push(`超阈值负值合计(已从SUM剔除): ${details.severe_negative_total}`);
+    }
+
+    if (typeof details.filtered_negative_total === 'number') {
+      lines.push(`已过滤负值合计: ${details.filtered_negative_total}（结果为净化口径）`);
     }
 
     if (typeof details.policy === 'string' && details.policy.trim()) {
@@ -330,8 +372,13 @@ function getIssueDetailBlock(issue: QualityIssue): ReactNode {
   const missingDiagnosticRows = details ? buildMissingDiagnosticRows(details) : [];
   const unmappedTagRows = details ? buildUnmappedTagRows(details) : [];
   const missingBucketRows = details ? buildMissingBucketRows(details) : [];
+  const missingBucketDeviceRows = details ? buildMissingBucketDeviceRows(details) : [];
   const severeNegativeTypeRows = details ? buildSevereNegativeTypeRows(details) : [];
   const sensorBiasRows = details ? buildSensorBiasRows(details) : [];
+  const hasMissingBucketRows = missingBucketRows.length > 0 || missingBucketDeviceRows.length > 0;
+  const useDeviceBucketTable =
+    missingBucketRows.length === 0
+    || (showDeviceDetails && missingBucketDeviceRows.length > 0);
 
   if (
     !lines.length
@@ -340,7 +387,7 @@ function getIssueDetailBlock(issue: QualityIssue): ReactNode {
     && !availableRows.length
     && !missingDiagnosticRows.length
     && !unmappedTagRows.length
-    && !missingBucketRows.length
+    && !hasMissingBucketRows
     && !severeNegativeTypeRows.length
     && !sensorBiasRows.length
   ) {
@@ -442,30 +489,81 @@ function getIssueDetailBlock(issue: QualityIssue): ReactNode {
         </div>
       )}
 
-      {missingBucketRows.length > 0 && (
+      {hasMissingBucketRows && (
         <div>
-          <Text strong>缺失时段样例</Text>
-          <Table<MissingBucketRow>
-            size="small"
-            pagination={false}
-            rowKey="key"
-            style={{ marginTop: 6 }}
-            scroll={{ x: 900 }}
-            columns={[
-              { title: 'metric_name', dataIndex: 'metric_name', key: 'metric_name', width: 180 },
-              { title: 'bucket_time', dataIndex: 'bucket_time', key: 'bucket_time', width: 180 },
-              { title: 'actual', dataIndex: 'actual_samples', key: 'actual_samples', width: 80 },
-              { title: 'expected', dataIndex: 'expected_samples', key: 'expected_samples', width: 90 },
-              {
-                title: 'completeness',
-                dataIndex: 'completeness_rate',
-                key: 'completeness_rate',
-                width: 110,
-                render: (value: number) => `${value.toFixed(1)}%`,
-              },
-            ]}
-            dataSource={missingBucketRows}
-          />
+          <Space
+            align="center"
+            style={{ width: '100%', justifyContent: 'space-between' }}
+            wrap
+          >
+            <Text strong>缺失时段样例（默认按小时聚合）</Text>
+            {missingBucketRows.length > 0 && missingBucketDeviceRows.length > 0 && (
+              <Space size={6}>
+                <Text type="secondary">查看设备明细</Text>
+                <Switch
+                  size="small"
+                  checked={showDeviceDetails}
+                  onChange={setShowDeviceDetails}
+                />
+              </Space>
+            )}
+          </Space>
+
+          {!useDeviceBucketTable ? (
+            <Table<MissingBucketRow>
+              size="small"
+              pagination={false}
+              rowKey="key"
+              style={{ marginTop: 6 }}
+              scroll={{ x: 900 }}
+              columns={[
+                { title: 'metric_name', dataIndex: 'metric_name', key: 'metric_name', width: 180 },
+                { title: 'bucket_time', dataIndex: 'bucket_time', key: 'bucket_time', width: 180 },
+                { title: 'actual', dataIndex: 'actual_samples', key: 'actual_samples', width: 80 },
+                { title: 'expected', dataIndex: 'expected_samples', key: 'expected_samples', width: 90 },
+                {
+                  title: 'completeness',
+                  dataIndex: 'completeness_rate',
+                  key: 'completeness_rate',
+                  width: 110,
+                  render: (value: number) => `${value.toFixed(1)}%`,
+                },
+              ]}
+              dataSource={missingBucketRows}
+            />
+          ) : (
+            <Table<MissingBucketDeviceRow>
+              size="small"
+              pagination={false}
+              rowKey="key"
+              style={{ marginTop: 6 }}
+              scroll={{ x: 1560 }}
+              columns={[
+                { title: 'metric_name', dataIndex: 'metric_name', key: 'metric_name', width: 160 },
+                { title: 'bucket_time', dataIndex: 'bucket_time', key: 'bucket_time', width: 180 },
+                { title: 'building_id', dataIndex: 'building_id', key: 'building_id', width: 90 },
+                { title: 'system_id', dataIndex: 'system_id', key: 'system_id', width: 90 },
+                { title: 'equipment_type', dataIndex: 'equipment_type', key: 'equipment_type', width: 150 },
+                { title: 'equipment_id', dataIndex: 'equipment_id', key: 'equipment_id', width: 120 },
+                {
+                  title: 'sub_equipment_id',
+                  dataIndex: 'sub_equipment_id',
+                  key: 'sub_equipment_id',
+                  width: 140,
+                },
+                { title: 'actual', dataIndex: 'actual_samples', key: 'actual_samples', width: 80 },
+                { title: 'expected', dataIndex: 'expected_samples', key: 'expected_samples', width: 90 },
+                {
+                  title: 'completeness',
+                  dataIndex: 'completeness_rate',
+                  key: 'completeness_rate',
+                  width: 110,
+                  render: (value: number) => `${value.toFixed(1)}%`,
+                },
+              ]}
+              dataSource={missingBucketDeviceRows}
+            />
+          )}
         </div>
       )}
 
@@ -540,7 +638,7 @@ export default function QualityIssuesPanel({ status, issues }: Props) {
                     type={issue.type === 'error' ? 'error' : 'warning'}
                     showIcon
                     message={issue.description}
-                    description={getIssueDetailBlock(issue)}
+                    description={<IssueDetailBlock issue={issue} />}
                   />
                 ))}
               </Space>

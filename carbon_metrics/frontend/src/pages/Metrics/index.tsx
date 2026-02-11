@@ -198,8 +198,8 @@ export default function MetricsPage() {
           description="请调整时间范围、设备筛选，或检查该指标依赖的数据是否已入库。"
         />
       )}
-      <QualityIssuesPanel status={result.status} issues={result.quality_issues} />
       <TracePanel trace={result.trace} />
+      <QualityIssuesPanel status={result.status} issues={result.quality_issues} />
       <BreakdownTable breakdown={result.breakdown} />
     </>
   );
