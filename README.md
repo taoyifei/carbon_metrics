@@ -16,21 +16,21 @@
 - 支持可选过滤维度：`building_id`、`system_id`、`equipment_type`、`equipment_id`、`sub_equipment_id`
 - 返回内容包括：指标值、单位、状态、质量评分、公式追踪、SQL、分解明细
 
-### 1.2 数据质量查询
+### 1.2 数据质量与设备查询
 - 质量汇总：`/api/quality/summary`
 - 质量明细分页：`/api/quality/list`
 - 异常问题分页：`/api/quality/issues`
 - 设备质量趋势：`/api/quality/equipment/{equipment_id}/trend`
 - 离线报告读取：`/api/quality/raw-report`（读取 `docs/data_quality_deep_report.csv`）
+- 设备下拉列表：`/api/equipment/ids`
 
 ### 1.3 前端页面
 
 | 路由 | 页面 | 说明 |
 |------|------|------|
 | `/` | Dashboard 总览 | 质量概览卡片 + 指标分类卡片 |
-| `/quality` | 数据质量 | 4 个 Tab：质量汇总、质量明细、异常问题、原始报告 |
+| `/quality` | 数据质量 | 5 个 Tab：质量汇总、质量明细、异常问题、原始报告、设备列表 |
 | `/metrics` | 指标分析 | 选择时间范围计算指标，展示结果、公式追溯、质量问题、分解明细 |
-| `/quality`（设备列表 Tab） | 设备管理 | 设备质量列表，支持按类型/等级/粒度筛选 |
 | `/quality/equipment/:equipmentId` | 设备详情 | 单设备质量趋势 |
 
 补充：
@@ -69,49 +69,53 @@
 ## 3. 目录结构
 
 ```text
-src/carbon_metrics/
+src/
 ├── README.md
-├── API 使用教程.md
-├── logs/
-│   └── metric_calculations.log
-├── backend/
-│   ├── main.py                 # FastAPI 入口
-│   ├── config.py               # 环境变量配置
-│   ├── db.py                   # DB 连接与游标上下文
-│   ├── models.py               # Pydantic 模型
-│   ├── routers/
-│   │   ├── metrics.py          # 指标 API
-│   │   └── quality.py          # 质量 API
-│   ├── services/
-│   │   ├── metric_calculator.py
-│   │   └── quality_service.py
-│   └── metrics/
-│       ├── base.py             # 指标基类 + CalculationResult
-│       ├── energy.py           # 4 个能耗指标
-│       ├── temperature.py      # 5 个温度指标
-│       ├── flow.py             # 3 个流量指标
-│       ├── chiller.py          # 4 个冷机指标（含冷机COP）
-│       ├── pump.py             # 2 个水泵指标
-│       ├── tower.py            # 2 个冷却塔指标
-│       ├── stability.py        # 2 个稳定性指标
-│       └── maintenance.py      # 1 个维护指标
-└── frontend/
-    ├── package.json
-    ├── vite.config.ts           # Vite 配置 + /api 代理
-    ├── tsconfig.json
-    └── src/
-        ├── main.tsx             # 入口
-        ├── App.tsx              # 路由定义
-        ├── api/                 # Axios client + API 调用 + 类型
-        ├── hooks/               # React Query hooks
-        ├── constants/           # 设备类型、指标分类、质量等级映射
-        ├── layouts/             # AppLayout (Sider + Header + Content)
-        ├── components/          # 共享组件 (8 个)
-        └── pages/
-            ├── Dashboard/       # 总览页
-            ├── Quality/         # 数据质量页 (4 Tab)
-            ├── MetricDetail/    # 指标详情页
-            └── Equipment/       # 设备管理页
+└── carbon_metrics/
+    ├── API 使用教程.md
+    ├── requirements.txt
+    ├── logs/
+    │   └── metric_calculations.log
+    ├── backend/
+    │   ├── main.py                 # FastAPI 入口
+    │   ├── config.py               # 环境变量配置
+    │   ├── db.py                   # DB 连接与游标上下文
+    │   ├── models.py               # Pydantic 模型
+    │   ├── routers/
+    │   │   ├── metrics.py          # 指标 API
+    │   │   ├── quality.py          # 质量 API
+    │   │   └── equipment.py        # 设备 API
+    │   ├── services/
+    │   │   ├── metric_calculator.py
+    │   │   └── quality_service.py
+    │   └── metrics/
+    │       ├── base.py             # 指标基类 + CalculationResult
+    │       ├── energy.py           # 4 个能耗指标
+    │       ├── temperature.py      # 5 个温度指标
+    │       ├── flow.py             # 3 个流量指标
+    │       ├── chiller.py          # 4 个冷机指标（含冷机COP）
+    │       ├── pump.py             # 2 个水泵指标
+    │       ├── tower.py            # 2 个冷却塔指标
+    │       ├── stability.py        # 2 个稳定性指标
+    │       └── maintenance.py      # 1 个维护指标
+    └── frontend/
+        ├── package.json
+        ├── vite.config.ts          # Vite 配置 + /api 代理
+        ├── tsconfig.json
+        └── src/
+            ├── main.tsx            # 入口
+            ├── App.tsx             # 路由定义
+            ├── api/                # Axios client + API 调用 + 类型
+            ├── hooks/              # React Query hooks
+            ├── constants/          # 设备类型、指标分类、质量等级映射
+            ├── layouts/            # AppLayout (Sider + Header + Content)
+            ├── components/         # 共享组件 (9 个)
+            └── pages/
+                ├── Dashboard/
+                ├── Quality/        # 数据质量页（5 Tab）
+                ├── Metrics/        # 指标分析页
+                ├── Equipment/
+                └── MetricDetail/
 ```
 
 ---
@@ -138,9 +142,9 @@ src/carbon_metrics/
 可参考建表脚本：
 - `norm/create_sql/database_v2_2.sql`
 
-### 4.3 设备主数据表
-设备列表/趋势相关依赖：
-- `equipment_registry`
+### 4.3 设备相关数据来源
+- 设备下拉接口 `/api/equipment/ids`：基于 `agg_hour` 去重查询，仅返回有聚合数据的设备。
+- 设备主数据维护：`equipment_registry`。
 
 ### 4.4 离线质量报告
 接口 `/api/quality/raw-report` 读取：
@@ -183,7 +187,7 @@ src/carbon_metrics/
 ### 6.1 后端依赖
 
 ```powershell
-pip install -r carbon_metrics/requirements.txt
+pip install -r src/carbon_metrics/requirements.txt
 ```
 
 如果你当前就在 `carbon_metrics/` 目录内，可改用：
@@ -195,19 +199,20 @@ pip install -r requirements.txt
 ### 6.2 前端依赖
 
 ```powershell
-cd carbon_metrics/frontend
+cd src/carbon_metrics/frontend
 npm install
 ```
 
 ### 6.3 启动后端
 
-推荐在包含 `carbon_metrics/` 目录的仓库根目录启动：
+推荐在仓库根目录先进入 `src/` 后启动：
 
 ```powershell
+cd src
 uvicorn carbon_metrics.backend.main:app --reload
 ```
 
-如果你当前就在 `carbon_metrics/` 目录内，可改用：
+如果你当前就在 `src/carbon_metrics/` 目录内，可改用：
 
 ```powershell
 uvicorn backend.main:app --reload
@@ -220,7 +225,7 @@ uvicorn backend.main:app --reload
 ### 6.4 启动前端
 
 ```powershell
-cd carbon_metrics/frontend
+cd src/carbon_metrics/frontend
 npm run dev
 ```
 
@@ -231,7 +236,7 @@ npm run dev
 ### 6.5 构建前端
 
 ```powershell
-cd carbon_metrics/frontend
+cd src/carbon_metrics/frontend
 npm run build
 ```
 
@@ -240,13 +245,14 @@ npm run build
 后端：
 
 ```powershell
+cd src
 uvicorn carbon_metrics.backend.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 前端（已在 `vite.config.ts` 配置 `host: '0.0.0.0'`）：
 
 ```powershell
-cd carbon_metrics/frontend
+cd src/carbon_metrics/frontend
 npm run dev
 ```
 
@@ -319,6 +325,9 @@ npm run dev
 - `GET /api/quality/equipment/{equipment_id}/trend`
 - `GET /api/quality/raw-report`
 
+### 7.3 设备 API
+- `GET /api/equipment/ids`
+
 ---
 
 ## 8. 请求示例
@@ -357,7 +366,6 @@ curl "http://127.0.0.1:8000/api/quality/issues?time_start=2025-07-01T00:00:00&ti
 
 ### 9.2 质量问题扫描日志
 `/api/quality/issues` 会记录扫描统计：
-- `scanned_rows`
 - `total_issues`
 - `page`
 - `page_size`
@@ -410,35 +418,7 @@ cd src/carbon_metrics/frontend
 npm run build
 ```
 
-### 11.3 Phase B 只读联调脚本
-
-```powershell
-python src/carbon_metrics/backend/tools/readonly_metric_integration_report.py --time-start 2025-07-01T00:00:00 --time-end 2026-01-21T00:00:00
-```
-
-脚本固定输出四段：
-- `指标状态分布`
-- `缺失依赖矩阵`
-- `指标取数审计`
-- `可疑指标清单`
-
-### 11.4 补数后库表对齐校验（只读）
-
-```powershell
-python norm/create_sql/validate_backfill_alignment.py --energy-dir data1 --params-dir data1 --output-json docs/backfill_alignment_report.json
-```
-
-脚本输出：
-- `backfill_alignment_summary`：按 `tag/device` 的本地预期行数 vs DB 行数
-- `backfill_alignment_mismatch_top`：文件级差异
-- `backfill_alignment_warnings`：读取异常文件
-
-如需在回归中“发现不一致即失败”，可增加：
-```powershell
-python norm/create_sql/validate_backfill_alignment.py --energy-dir data1 --params-dir data1 --fail-on-mismatch
-```
-
-### 11.5 一体化抽查（validate_data.py）
+### 11.3 一体化抽查（validate_data.py）
 
 仅跑抽查（推荐日常回归）：
 
