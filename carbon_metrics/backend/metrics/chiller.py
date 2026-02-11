@@ -331,7 +331,7 @@ class ChillerCopMetric(BaseMetric):
             time_end=ctx.time_end,
             building_id=ctx.building_id,
             system_id=ctx.system_id,
-            equipment_type=ctx.equipment_type,
+            equipment_type=None,
             equipment_id=ctx.equipment_id,
             sub_equipment_id=None,
         )
@@ -358,7 +358,7 @@ class ChillerCopMetric(BaseMetric):
             time_end=ctx.time_end,
             building_id=ctx.building_id,
             system_id=ctx.system_id,
-            equipment_type=ctx.equipment_type,
+            equipment_type=None,
             equipment_id=ctx.equipment_id,
             sub_equipment_id=None,
         )

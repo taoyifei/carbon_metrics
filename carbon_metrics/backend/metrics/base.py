@@ -708,6 +708,7 @@ class BaseMetric(ABC):
             return {
                 "incomplete_bucket_count": 0,
                 "missing_bucket_samples": [],
+                "missing_bucket_device_samples": [],
             }
 
         conditions, params = self._build_scope_conditions(
@@ -720,12 +721,19 @@ class BaseMetric(ABC):
             SELECT
                 metric_name,
                 bucket_time,
-                expected_samples,
-                actual_samples,
-                completeness_rate
+                COALESCE(SUM(expected_samples), 0) AS expected_samples,
+                COALESCE(SUM(actual_samples), 0) AS actual_samples,
+                CASE
+                    WHEN COALESCE(SUM(expected_samples), 0) = 0 THEN 0
+                    ELSE ROUND(
+                        COALESCE(SUM(actual_samples), 0) / SUM(expected_samples) * 100,
+                        1
+                    )
+                END AS completeness_rate
             FROM agg_hour_quality
             WHERE {where_clause}
-              AND completeness_rate < 99.9
+            GROUP BY metric_name, bucket_time
+            HAVING COALESCE(SUM(actual_samples), 0) < COALESCE(SUM(expected_samples), 0)
             ORDER BY bucket_time ASC, metric_name ASC
             LIMIT %s
         """
@@ -734,12 +742,43 @@ class BaseMetric(ABC):
 
         count_sql = f"""
             SELECT COUNT(*) AS cnt
-            FROM agg_hour_quality
-            WHERE {where_clause}
-              AND completeness_rate < 99.9
+            FROM (
+                SELECT metric_name, bucket_time
+                FROM agg_hour_quality
+                WHERE {where_clause}
+                GROUP BY metric_name, bucket_time
+                HAVING COALESCE(SUM(actual_samples), 0) < COALESCE(SUM(expected_samples), 0)
+            ) AS grouped_incomplete
         """
         count_row = self._cached_fetchone(
             cursor, count_sql, params + metric_names)
+
+        detail_sql = f"""
+            SELECT
+                metric_name,
+                bucket_time,
+                building_id,
+                system_id,
+                equipment_type,
+                equipment_id,
+                sub_equipment_id,
+                expected_samples,
+                actual_samples,
+                completeness_rate
+            FROM agg_hour_quality
+            WHERE {where_clause}
+              AND completeness_rate < 99.9
+            ORDER BY
+                bucket_time ASC,
+                metric_name ASC,
+                building_id ASC,
+                system_id ASC,
+                equipment_type ASC,
+                equipment_id ASC
+            LIMIT %s
+        """
+        detail_rows = self._cached_fetchall(
+            cursor, detail_sql, params + metric_names + [limit])
 
         samples: List[Dict[str, Any]] = []
         for row in sample_rows:
@@ -752,9 +791,26 @@ class BaseMetric(ABC):
                 "completeness_rate": float(row.get("completeness_rate") or 0.0),
             })
 
+        detail_samples: List[Dict[str, Any]] = []
+        for row in detail_rows:
+            bucket_time = row.get("bucket_time")
+            detail_samples.append({
+                "metric_name": str(row.get("metric_name") or ""),
+                "bucket_time": str(bucket_time) if bucket_time is not None else "",
+                "building_id": str(row.get("building_id") or ""),
+                "system_id": str(row.get("system_id") or ""),
+                "equipment_type": str(row.get("equipment_type") or ""),
+                "equipment_id": str(row.get("equipment_id") or ""),
+                "sub_equipment_id": str(row.get("sub_equipment_id") or ""),
+                "expected_samples": int(row.get("expected_samples") or 0),
+                "actual_samples": int(row.get("actual_samples") or 0),
+                "completeness_rate": float(row.get("completeness_rate") or 0.0),
+            })
+
         return {
             "incomplete_bucket_count": int((count_row or {}).get("cnt") or 0),
             "missing_bucket_samples": samples,
+            "missing_bucket_device_samples": detail_samples,
         }
 
     def _check_quality_from_table(

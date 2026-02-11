@@ -21,22 +21,22 @@ TOWER_TYPES = {"cooling_tower", "cooling_tower_closed", "tower_fan"}
 COMPONENT_RULES = [
     {
         "key": "chiller",
-        "label": "冷机电量",
+        "label": "Chiller Energy",
         "types": CHILLER_TYPES,
     },
     {
         "key": "chilled_pump",
-        "label": "冷冻泵电量",
+        "label": "Chilled Pump Energy",
         "types": {"chilled_pump"},
     },
     {
         "key": "cooling_pump",
-        "label": "冷却泵电量",
+        "label": "Cooling Pump Energy",
         "types": {"cooling_pump"},
     },
     {
         "key": "tower",
-        "label": "冷塔电量",
+        "label": "Tower Energy",
         "types": TOWER_TYPES,
     },
 ]
@@ -56,7 +56,7 @@ def _query_energy_by_type(
     clamp_threshold: float,
     query_cache: Optional[Dict] = None,
 ) -> Tuple[Optional[List], Optional[str], Optional[str]]:
-    """查询按 equipment_type 分组的能耗数据，返回 (rows, sql, error)"""
+    """按 equipment_type 分组查询能耗数据，返回 (rows, sql, error)。"""
     conditions = [
         "metric_name = 'energy'",
         "bucket_time >= %s",
@@ -88,7 +88,7 @@ def _query_energy_by_type(
             equipment_type,
             SUM(
                 CASE
-                    WHEN agg_delta < 0 AND agg_delta >= -%s THEN 0
+                    WHEN agg_delta < 0 THEN 0
                     ELSE agg_delta
                 END
             ) AS total_energy,
@@ -128,7 +128,6 @@ def _query_energy_by_type(
             clamp_threshold,
             clamp_threshold,
             clamp_threshold,
-            clamp_threshold,
             *params,
         ]
         cache_key = ("energy_by_type", sql.strip(), tuple(str(p) for p in query_params))
@@ -158,7 +157,7 @@ def _aggregate_energy(
     List[str],
     Dict[str, Any],
 ]:
-    """聚合能耗数据"""
+    """Aggregate energy data."""
     type_map: Dict[str, float] = {}
     total_records = 0
     breakdown = []
@@ -240,18 +239,21 @@ def _build_negative_delta_issues(
     severe_count = int(negative_summary.get("severe_negative_count") or 0)
     severe_total = float(negative_summary.get("severe_negative_total") or 0.0)
     severe_by_type = negative_summary.get("severe_negative_by_type") or []
+    filtered_count = clamped_count + severe_count
+    filtered_total = clamped_total + severe_total
 
     if clamped_count > 0:
         issues.append({
             "type": "negative_delta_clamped",
             "description": (
-                f"发现 {clamped_count} 条小负值（阈值: {clamp_threshold}），已按 0 处理"
+                f"Detected {clamped_count} small negative deltas "
+                f"(-{clamp_threshold} <= agg_delta < 0); excluded from SUM."
             ),
             "count": clamped_count,
             "details": {
                 "clamp_threshold": clamp_threshold,
                 "clamped_negative_total": round(clamped_total, 2),
-                "policy": "-threshold <= agg_delta < 0 -> 0",
+                "policy": "-threshold <= agg_delta < 0 -> excluded_from_sum",
             },
         })
 
@@ -259,23 +261,38 @@ def _build_negative_delta_issues(
         issues.append({
             "type": "negative_delta_alert",
             "description": (
-                f"发现 {severe_count} 条超阈值负值（< -{clamp_threshold}），保留原值并告警"
+                f"Detected {severe_count} severe negative deltas "
+                f"(agg_delta < -{clamp_threshold}); excluded from SUM and flagged."
             ),
             "count": severe_count,
             "details": {
                 "clamp_threshold": clamp_threshold,
                 "severe_negative_total": round(severe_total, 2),
                 "severe_negative_by_type": severe_by_type,
-                "policy": "agg_delta < -threshold -> keep raw",
+                "policy": "agg_delta < -threshold -> excluded_from_sum_and_alert",
+            },
+        })
+
+    if filtered_count > 0:
+        issues.append({
+            "type": "result_beautified",
+            "description": (
+                "This metric uses cleaned SUM scope: all negative deltas are excluded."
+            ),
+            "count": filtered_count,
+            "details": {
+                "clamp_threshold": clamp_threshold,
+                "filtered_negative_count": filtered_count,
+                "filtered_negative_total": round(filtered_total, 2),
+                "severe_negative_by_type": severe_by_type,
+                "policy": "agg_delta < 0 -> excluded_from_sum",
             },
         })
 
     return issues
 
-
 class TotalEnergyMetric(BaseMetric):
-    """系统总电量指标"""
-
+    """Total energy metric."""
     @property
     def metric_name(self) -> str:
         return "系统总电量"
@@ -286,14 +303,14 @@ class TotalEnergyMetric(BaseMetric):
 
     @property
     def formula(self) -> str:
-        return "系统总电量 = 冷机电量 + 冷冻泵电量 + 冷却泵电量 + 冷塔电量"
+        return "系统总电量 = 冷机电量 + 冷冻泵电量 + 冷却泵电量 + 冷却塔电量"
 
     def _query_component_bucket_coverage(
         self,
         cursor,
         ctx: MetricContext,
     ) -> Tuple[int, Dict[str, int], int, List[str], int]:
-        """查询组件按小时覆盖情况"""
+        """Query component coverage by hour."""
         conditions, params = self._build_scope_conditions(ctx)
         conditions.append("metric_name = %s")
         params.append("energy")
@@ -396,7 +413,7 @@ class TotalEnergyMetric(BaseMetric):
             formula_with_values = ""
             total = 0.0
 
-            # 未显式筛选设备类型时，按公式固定组件口径计算总电量
+            # If equipment_type is not explicitly filtered, use fixed formula components.
             if not ctx.equipment_type:
                 component_values = [
                     ("chiller", round(component_totals["chiller"], 2)),
@@ -416,7 +433,7 @@ class TotalEnergyMetric(BaseMetric):
                 if missing_components:
                     component_issues.append({
                         "type": "missing_component",
-                        "description": f"总电量口径缺少组件: {', '.join(missing_components)}",
+                        "description": f"总电量口径缺少组件 {', '.join(missing_components)}",
                         "count": len(missing_components),
                         "details": {
                             "missing_components": missing_components,
@@ -438,7 +455,9 @@ class TotalEnergyMetric(BaseMetric):
                 if missing_hours > 0:
                     component_issues.append({
                         "type": "missing_time_bucket",
-                        "description": f"共有 {missing_hours}/{expected_hours} 小时缺少至少一类组件数据",
+                        "description": (
+                            f"Detected {missing_hours}/{expected_hours} hours with missing component coverage."
+                        ),
                         "count": missing_hours,
                         "details": {
                             "expected_hours": expected_hours,
@@ -489,8 +508,7 @@ class TotalEnergyMetric(BaseMetric):
 
 
 class _EnergyRatioBase(BaseMetric):
-    """能耗占比指标基类"""
-
+    """Energy ratio metric base class."""
     @property
     def unit(self) -> str:
         return "%"
@@ -577,7 +595,7 @@ class _EnergyRatioBase(BaseMetric):
             if total == 0:
                 all_issues = quality_issues + calc_issues + [{
                     "type": "zero_denominator",
-                    "description": "总电量为0，无法形成有效占比",
+                    "description": "Total energy is 0, ratio cannot be calculated.",
                 }]
                 return CalculationResult(
                     metric_name=self.metric_name,
@@ -585,7 +603,7 @@ class _EnergyRatioBase(BaseMetric):
                     unit=self.unit,
                     status="partial",
                     formula=self.formula,
-                    formula_with_values="= 0 / 0 (总电量为0)",
+                    formula_with_values="= 0 / 0 (鎬荤數閲忎负0)",
                     sql_executed=sql,
                     input_records=total_records,
                     valid_records=total_records,
@@ -597,7 +615,7 @@ class _EnergyRatioBase(BaseMetric):
                 )
 
             ratio = round(part / total * 100, 2)
-            formula_with_values = f"= {part} / {total} × 100% = {ratio}%"
+            formula_with_values = f"= {part} / {total} x 100% = {ratio}%"
             all_issues = quality_issues + calc_issues
             status = "partial" if all_issues else "success"
 
@@ -620,8 +638,7 @@ class _EnergyRatioBase(BaseMetric):
 
 
 class ChillerEnergyRatioMetric(_EnergyRatioBase):
-    """冷机能耗占比"""
-
+    """Chiller energy ratio metric."""
     @property
     def metric_name(self) -> str:
         return "冷机能耗占比"
@@ -636,12 +653,11 @@ class ChillerEnergyRatioMetric(_EnergyRatioBase):
 
     @property
     def _target_label(self) -> str:
-        return "冷机"
+        return "Chiller"
 
 
 class PumpEnergyRatioMetric(_EnergyRatioBase):
-    """水泵能耗占比"""
-
+    """Pump energy ratio metric."""
     @property
     def metric_name(self) -> str:
         return "水泵能耗占比"
@@ -656,19 +672,18 @@ class PumpEnergyRatioMetric(_EnergyRatioBase):
 
     @property
     def _target_label(self) -> str:
-        return "水泵"
+        return "Pump"
 
 
 class TowerEnergyRatioMetric(_EnergyRatioBase):
-    """风机能耗占比"""
-
+    """Tower energy ratio metric."""
     @property
     def metric_name(self) -> str:
         return "风机能耗占比"
 
     @property
     def formula(self) -> str:
-        return "风机能耗占比 = 冷塔电量 / 系统总电量 × 100%"
+        return "风机能耗占比 = 冷却塔电量 / 系统总电量 × 100%"
 
     @property
     def _target_types(self) -> set:
@@ -676,4 +691,10 @@ class TowerEnergyRatioMetric(_EnergyRatioBase):
 
     @property
     def _target_label(self) -> str:
-        return "冷塔"
+        return "Tower"
+
+
+
+
+
+

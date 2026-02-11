@@ -1,12 +1,11 @@
-"""
-温度与温差指标计算
-"""
-from typing import List, Any
+"""温度与温差指标计算"""
+from typing import Any, List
+
 from .base import BaseMetric, MetricContext, CalculationResult
 
 
 class _SingleTempMetric(BaseMetric):
-    """单一温度指标基类"""
+    """单一温度指标基类。"""
 
     @property
     def unit(self) -> str:
@@ -34,19 +33,24 @@ class _SingleTempMetric(BaseMetric):
                 cursor.execute(sql, params)
                 row = cursor.fetchone()
 
-                if not row or row["record_count"] == 0:
+                if not row or int(row["record_count"] or 0) == 0:
                     missing_issues = self._build_missing_dependency_issues(
-                        cursor, ctx, [self._metric_name_db])
+                        cursor, ctx, [self._metric_name_db]
+                    )
                     return CalculationResult(
-                        metric_name=self.metric_name, value=None,
-                        unit=self.unit, status="no_data", formula=self.formula,
+                        metric_name=self.metric_name,
+                        value=None,
+                        unit=self.unit,
+                        status="no_data",
+                        formula=self.formula,
                         quality_score=0.0,
                         quality_issues=missing_issues,
                     )
 
                 val = round(float(row["avg_val"] or 0), 2)
                 quality_score, quality_issues = self._check_quality_from_table(
-                    cursor, ctx, [self._metric_name_db])
+                    cursor, ctx, [self._metric_name_db]
+                )
 
                 return CalculationResult(
                     metric_name=self.metric_name,
@@ -54,24 +58,29 @@ class _SingleTempMetric(BaseMetric):
                     unit=self.unit,
                     status=self._status_from_issues(quality_issues),
                     formula=self.formula,
-                    formula_with_values=f"= AVG = {val}℃ (min={row['min_val']}, max={row['max_val']})",
+                    formula_with_values=(
+                        f"= AVG = {val}℃ (min={row['min_val']}, max={row['max_val']})"
+                    ),
                     sql_executed=sql.strip(),
-                    input_records=int(row["record_count"]),
-                    valid_records=int(row["record_count"]),
+                    input_records=int(row["record_count"] or 0),
+                    valid_records=int(row["record_count"] or 0),
                     data_source_condition=f"metric_name='{self._metric_name_db}'",
                     quality_score=quality_score,
                     quality_issues=quality_issues,
                 )
         except Exception as e:
             return CalculationResult(
-                metric_name=self.metric_name, value=None, unit=self.unit,
-                status="failed", formula=self.formula,
+                metric_name=self.metric_name,
+                value=None,
+                unit=self.unit,
+                status="failed",
+                formula=self.formula,
                 quality_issues=[{"type": "error", "description": str(e)}],
             )
 
 
 class ChilledSupplyTempMetric(_SingleTempMetric):
-    """冷冻水供水温度"""
+    """冷冻水供水温度。"""
 
     @property
     def metric_name(self) -> str:
@@ -87,7 +96,7 @@ class ChilledSupplyTempMetric(_SingleTempMetric):
 
 
 class ChilledReturnTempMetric(_SingleTempMetric):
-    """冷冻水回水温度"""
+    """冷冻水回水温度。"""
 
     @property
     def metric_name(self) -> str:
@@ -103,7 +112,7 @@ class ChilledReturnTempMetric(_SingleTempMetric):
 
 
 class CoolingSupplyTempMetric(_SingleTempMetric):
-    """冷却水供水温度"""
+    """冷却水供水温度。"""
 
     @property
     def metric_name(self) -> str:
@@ -119,7 +128,7 @@ class CoolingSupplyTempMetric(_SingleTempMetric):
 
 
 class CoolingReturnTempMetric(_SingleTempMetric):
-    """冷却水回水温度"""
+    """冷却水回水温度。"""
 
     @property
     def metric_name(self) -> str:
@@ -135,7 +144,7 @@ class CoolingReturnTempMetric(_SingleTempMetric):
 
 
 class ChilledWaterDeltaTMetric(BaseMetric):
-    """冷冻水温差"""
+    """冷冻水温差。"""
 
     @property
     def metric_name(self) -> str:
@@ -147,56 +156,89 @@ class ChilledWaterDeltaTMetric(BaseMetric):
 
     @property
     def formula(self) -> str:
-        return "冷冻水温差 = AVG(chilled_return_temp) - AVG(chilled_supply_temp)"
+        return "冷冻水温差 = AVG(chilled_return_temp - chilled_supply_temp)，按小时对齐"
 
     def calculate(self, ctx: MetricContext) -> CalculationResult:
         where_ret, params_ret = self._build_where(ctx, "chilled_return_temp")
         where_sup, params_sup = self._build_where(ctx, "chilled_supply_temp")
 
-        sql_ret = f"SELECT AVG(agg_avg) AS v, COUNT(*) AS n FROM agg_hour WHERE {where_ret}"
-        sql_sup = f"SELECT AVG(agg_avg) AS v, COUNT(*) AS n FROM agg_hour WHERE {where_sup}"
+        sql = f"""
+            WITH ret_hour AS (
+                SELECT bucket_time, AVG(agg_avg) AS ret_avg, COUNT(*) AS ret_cnt
+                FROM agg_hour
+                WHERE {where_ret}
+                GROUP BY bucket_time
+            ),
+            sup_hour AS (
+                SELECT bucket_time, AVG(agg_avg) AS sup_avg, COUNT(*) AS sup_cnt
+                FROM agg_hour
+                WHERE {where_sup}
+                GROUP BY bucket_time
+            )
+            SELECT
+                COUNT(*) AS overlapped_hours,
+                AVG(rh.ret_avg) AS avg_ret,
+                AVG(sh.sup_avg) AS avg_sup,
+                AVG(rh.ret_avg - sh.sup_avg) AS avg_delta_t,
+                SUM(rh.ret_cnt) + SUM(sh.sup_cnt) AS total_records
+            FROM ret_hour rh
+            JOIN sup_hour sh ON sh.bucket_time = rh.bucket_time
+        """
 
         try:
             with self.db.cursor() as cursor:
-                cursor.execute(sql_ret, params_ret)
-                r_ret = cursor.fetchone()
-                cursor.execute(sql_sup, params_sup)
-                r_sup = cursor.fetchone()
+                cursor.execute(sql, params_ret + params_sup)
+                row = cursor.fetchone()
 
-                if (not r_ret or r_ret["n"] == 0
-                        or not r_sup or r_sup["n"] == 0):
+                if not row or int(row["overlapped_hours"] or 0) == 0:
                     missing_issues = self._build_missing_dependency_issues(
-                        cursor, ctx, ["chilled_return_temp", "chilled_supply_temp"])
+                        cursor, ctx, ["chilled_return_temp", "chilled_supply_temp"]
+                    )
                     return CalculationResult(
-                        metric_name=self.metric_name, value=None,
-                        unit=self.unit, status="no_data",
+                        metric_name=self.metric_name,
+                        value=None,
+                        unit=self.unit,
+                        status="no_data",
                         formula=self.formula,
                         quality_score=0.0,
                         quality_issues=missing_issues,
                     )
 
-                ret_val = round(float(r_ret["v"] or 0), 2)
-                sup_val = round(float(r_sup["v"] or 0), 2)
-                delta = round(ret_val - sup_val, 2)
-                total_records = int(r_ret["n"]) + int(r_sup["n"])
+                ret_val = round(float(row["avg_ret"] or 0), 2)
+                sup_val = round(float(row["avg_sup"] or 0), 2)
+                delta = round(float(row["avg_delta_t"] or 0), 2)
+                overlapped_hours = int(row["overlapped_hours"] or 0)
+                total_records = int(row["total_records"] or 0)
                 quality_score, quality_issues = self._check_quality_from_table(
-                    cursor, ctx, ["chilled_return_temp", "chilled_supply_temp"])
+                    cursor, ctx, ["chilled_return_temp", "chilled_supply_temp"]
+                )
 
                 return CalculationResult(
-                    metric_name=self.metric_name, value=delta,
-                    unit=self.unit, status=self._status_from_issues(quality_issues),
+                    metric_name=self.metric_name,
+                    value=delta,
+                    unit=self.unit,
+                    status=self._status_from_issues(quality_issues),
                     formula=self.formula,
-                    formula_with_values=f"= {ret_val} - {sup_val} = {delta}℃",
-                    sql_executed=f"{sql_ret.strip()}; {sql_sup.strip()}",
+                    formula_with_values=(
+                        f"= AVG(return-supply, aligned {overlapped_hours}h) = {delta}℃ "
+                        f"(avg_return={ret_val}, avg_supply={sup_val})"
+                    ),
+                    sql_executed=sql.strip(),
                     input_records=total_records,
                     valid_records=total_records,
-                    data_source_condition="metric_name IN ('chilled_return_temp','chilled_supply_temp')",
+                    data_source_condition=(
+                        "metric_name IN ('chilled_return_temp','chilled_supply_temp'), "
+                        "aligned by bucket_time"
+                    ),
                     quality_score=quality_score,
                     quality_issues=quality_issues,
                 )
         except Exception as e:
             return CalculationResult(
-                metric_name=self.metric_name, value=None, unit=self.unit,
-                status="failed", formula=self.formula,
+                metric_name=self.metric_name,
+                value=None,
+                unit=self.unit,
+                status="failed",
+                formula=self.formula,
                 quality_issues=[{"type": "error", "description": str(e)}],
             )

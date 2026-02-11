@@ -1,6 +1,4 @@
-"""
-运行稳定性指标计算。
-"""
+"""运行稳定性指标计算。"""
 from __future__ import annotations
 
 from typing import Any, List, Optional, Tuple
@@ -9,8 +7,7 @@ from .base import BaseMetric, MetricContext, CalculationResult
 
 
 class _RuntimeRatioMetric(BaseMetric):
-    """运行时长占比基类。"""
-
+    """Runtime ratio metric base class."""
     @property
     def unit(self) -> str:
         return "%"
@@ -103,7 +100,7 @@ class _RuntimeRatioMetric(BaseMetric):
                         SELECT
                             SUM(
                                 CASE
-                                    WHEN agg_delta < 0 AND agg_delta >= -%s THEN 0
+                                    WHEN agg_delta < 0 THEN 0
                                     ELSE agg_delta
                                 END
                             ) AS total_runtime,
@@ -137,7 +134,6 @@ class _RuntimeRatioMetric(BaseMetric):
                         WHERE {where}
                     """
                     query_params: List[Any] = [
-                        clamp_threshold,
                         clamp_threshold,
                         clamp_threshold,
                         clamp_threshold,
@@ -198,13 +194,14 @@ class _RuntimeRatioMetric(BaseMetric):
                     calc_issues.append({
                         "type": "negative_delta_clamped",
                         "description": (
-                            f"发现 {clamped_negative_count} 条小负值（阈值: {clamp_threshold}），已按 0 处理"
+                            f"Detected {clamped_negative_count} small negative deltas "
+                            f"(-{clamp_threshold} <= agg_delta < 0); excluded from SUM."
                         ),
                         "count": clamped_negative_count,
                         "details": {
                             "clamp_threshold": clamp_threshold,
                             "clamped_negative_total": round(clamped_negative_total, 2),
-                            "policy": "-threshold <= agg_delta < 0 -> 0",
+                            "policy": "-threshold <= agg_delta < 0 -> excluded_from_sum",
                         },
                     })
 
@@ -214,13 +211,31 @@ class _RuntimeRatioMetric(BaseMetric):
                     calc_issues.append({
                         "type": "negative_delta_alert",
                         "description": (
-                            f"发现 {severe_negative_count} 条超阈值负值（< -{clamp_threshold}），保留原值并告警"
+                            f"Detected {severe_negative_count} severe negative deltas "
+                            f"(agg_delta < -{clamp_threshold}); excluded from SUM and flagged."
                         ),
                         "count": severe_negative_count,
                         "details": {
                             "clamp_threshold": clamp_threshold,
                             "severe_negative_total": round(severe_negative_total, 2),
-                            "policy": "agg_delta < -threshold -> keep raw",
+                            "policy": "agg_delta < -threshold -> excluded_from_sum_and_alert",
+                        },
+                    })
+
+                filtered_negative_count = clamped_negative_count + severe_negative_count
+                filtered_negative_total = clamped_negative_total + severe_negative_total
+                if filtered_negative_count > 0:
+                    calc_issues.append({
+                        "type": "result_beautified",
+                        "description": (
+                            "This metric uses cleaned SUM scope: all negative deltas are excluded."
+                        ),
+                        "count": filtered_negative_count,
+                        "details": {
+                            "clamp_threshold": clamp_threshold,
+                            "filtered_negative_count": filtered_negative_count,
+                            "filtered_negative_total": round(filtered_negative_total, 2),
+                            "policy": "agg_delta < 0 -> excluded_from_sum",
                         },
                     })
 
@@ -234,7 +249,7 @@ class _RuntimeRatioMetric(BaseMetric):
                 all_issues = quality_issues + calc_issues
                 formula_with_values = (
                     f"= {round(total_runtime, 1)}h"
-                    f" / ({round(period_hours, 2)}h × {device_count}台)"
+                    f" / ({round(period_hours, 2)}h x {device_count}台"
                     f" = {ratio}%"
                 )
 
@@ -270,15 +285,14 @@ class _RuntimeRatioMetric(BaseMetric):
 
 
 class ChillerRuntimeRatioMetric(_RuntimeRatioMetric):
-    """冷机运行时长占比。"""
-
+    """Chiller runtime ratio metric."""
     @property
     def metric_name(self) -> str:
         return "冷机运行时长占比"
 
     @property
     def formula(self) -> str:
-        return "冷机运行时长占比 = 冷机运行时长 / (评估周期 × 设备数) × 100%"
+        return "冷机运行时长占比 = 冷机运行时长 / (评估周期 x 设备数 x 100%"
 
     @property
     def _equipment_type(self) -> Optional[str]:
@@ -286,16 +300,17 @@ class ChillerRuntimeRatioMetric(_RuntimeRatioMetric):
 
 
 class TowerFanRuntimeRatioMetric(_RuntimeRatioMetric):
-    """风机运行时长占比。"""
-
+    """Tower fan runtime ratio metric."""
     @property
     def metric_name(self) -> str:
         return "风机运行时长占比"
 
     @property
     def formula(self) -> str:
-        return "风机运行时长占比 = 风机运行时长 / (评估周期 × 设备数) × 100%"
+        return "风机运行时长占比 = 风机运行时长 / (评估周期 x 设备数 x 100%"
 
     @property
     def _equipment_types(self) -> Optional[List[str]]:
         return ["tower_fan", "cooling_tower", "cooling_tower_closed"]
+
+

@@ -1,11 +1,11 @@
-"""冷却塔效率指标计算"""
+"""冷却塔相关指标计算。"""
 from typing import Any, List, Optional
 
 from .base import BaseMetric, MetricContext, CalculationResult
 
 
 class CoolingWaterDeltaTMetric(BaseMetric):
-    """冷却水温差"""
+    """冷却水温差。"""
 
     @property
     def metric_name(self) -> str:
@@ -17,63 +17,96 @@ class CoolingWaterDeltaTMetric(BaseMetric):
 
     @property
     def formula(self) -> str:
-        return "冷却水温差 = AVG(cooling_return_temp) - AVG(cooling_supply_temp)"
+        return "冷却水温差 = AVG(cooling_return_temp - cooling_supply_temp)，按小时对齐"
 
     def calculate(self, ctx: MetricContext) -> CalculationResult:
         where_ret, params_ret = self._build_where(ctx, "cooling_return_temp")
         where_sup, params_sup = self._build_where(ctx, "cooling_supply_temp")
 
-        sql_ret = f"SELECT AVG(agg_avg) AS v, COUNT(*) AS n FROM agg_hour WHERE {where_ret}"
-        sql_sup = f"SELECT AVG(agg_avg) AS v, COUNT(*) AS n FROM agg_hour WHERE {where_sup}"
+        sql = f"""
+            WITH ret_hour AS (
+                SELECT bucket_time, AVG(agg_avg) AS ret_avg, COUNT(*) AS ret_cnt
+                FROM agg_hour
+                WHERE {where_ret}
+                GROUP BY bucket_time
+            ),
+            sup_hour AS (
+                SELECT bucket_time, AVG(agg_avg) AS sup_avg, COUNT(*) AS sup_cnt
+                FROM agg_hour
+                WHERE {where_sup}
+                GROUP BY bucket_time
+            )
+            SELECT
+                COUNT(*) AS overlapped_hours,
+                AVG(rh.ret_avg) AS avg_ret,
+                AVG(sh.sup_avg) AS avg_sup,
+                AVG(rh.ret_avg - sh.sup_avg) AS avg_delta_t,
+                SUM(rh.ret_cnt) + SUM(sh.sup_cnt) AS total_records
+            FROM ret_hour rh
+            JOIN sup_hour sh ON sh.bucket_time = rh.bucket_time
+        """
 
         try:
             with self.db.cursor() as cursor:
-                cursor.execute(sql_ret, params_ret)
-                r_ret = cursor.fetchone()
-                cursor.execute(sql_sup, params_sup)
-                r_sup = cursor.fetchone()
+                cursor.execute(sql, params_ret + params_sup)
+                row = cursor.fetchone()
 
-                if (not r_ret or int(r_ret["n"] or 0) == 0
-                        or not r_sup or int(r_sup["n"] or 0) == 0):
+                if not row or int(row["overlapped_hours"] or 0) == 0:
                     missing_issues = self._build_missing_dependency_issues(
-                        cursor, ctx, ["cooling_return_temp", "cooling_supply_temp"])
+                        cursor, ctx, ["cooling_return_temp", "cooling_supply_temp"]
+                    )
                     return CalculationResult(
-                        metric_name=self.metric_name, value=None,
-                        unit=self.unit, status="no_data",
+                        metric_name=self.metric_name,
+                        value=None,
+                        unit=self.unit,
+                        status="no_data",
                         formula=self.formula,
                         quality_score=0.0,
                         quality_issues=missing_issues,
                     )
 
-                ret_val = round(float(r_ret["v"] or 0), 2)
-                sup_val = round(float(r_sup["v"] or 0), 2)
-                delta = round(ret_val - sup_val, 2)
-                total_records = int(r_ret["n"] or 0) + int(r_sup["n"] or 0)
+                ret_val = round(float(row["avg_ret"] or 0), 2)
+                sup_val = round(float(row["avg_sup"] or 0), 2)
+                delta = round(float(row["avg_delta_t"] or 0), 2)
+                overlapped_hours = int(row["overlapped_hours"] or 0)
+                total_records = int(row["total_records"] or 0)
                 quality_score, quality_issues = self._check_quality_from_table(
-                    cursor, ctx, ["cooling_return_temp", "cooling_supply_temp"])
+                    cursor, ctx, ["cooling_return_temp", "cooling_supply_temp"]
+                )
 
                 return CalculationResult(
-                    metric_name=self.metric_name, value=delta,
-                    unit=self.unit, status=self._status_from_issues(quality_issues),
+                    metric_name=self.metric_name,
+                    value=delta,
+                    unit=self.unit,
+                    status=self._status_from_issues(quality_issues),
                     formula=self.formula,
-                    formula_with_values=f"= {ret_val} - {sup_val} = {delta}℃",
-                    sql_executed=f"{sql_ret.strip()}; {sql_sup.strip()}",
+                    formula_with_values=(
+                        f"= AVG(return-supply, aligned {overlapped_hours}h) = {delta}℃ "
+                        f"(avg_return={ret_val}, avg_supply={sup_val})"
+                    ),
+                    sql_executed=sql.strip(),
                     input_records=total_records,
                     valid_records=total_records,
-                    data_source_condition="metric_name IN ('cooling_return_temp','cooling_supply_temp')",
+                    data_source_condition=(
+                        "metric_name IN ('cooling_return_temp','cooling_supply_temp'), "
+                        "aligned by bucket_time"
+                    ),
                     quality_score=quality_score,
                     quality_issues=quality_issues,
                 )
         except Exception as e:
             return CalculationResult(
-                metric_name=self.metric_name, value=None, unit=self.unit,
-                status="failed", formula=self.formula,
+                metric_name=self.metric_name,
+                value=None,
+                unit=self.unit,
+                status="failed",
+                formula=self.formula,
                 quality_issues=[{"type": "error", "description": str(e)}],
             )
 
 
 class TowerFanPowerMetric(BaseMetric):
-    """冷却塔风机功率"""
+    """冷却塔风机功率。"""
 
     TOWER_TYPES = ["cooling_tower", "cooling_tower_closed", "tower_fan"]
 
@@ -87,7 +120,10 @@ class TowerFanPowerMetric(BaseMetric):
 
     @property
     def formula(self) -> str:
-        return "冷却塔风机功率 = AVG(power) WHERE equipment_type IN (cooling_tower, cooling_tower_closed, tower_fan)"
+        return (
+            "冷却塔风机功率 = AVG(power), "
+            "equipment_type IN (cooling_tower, cooling_tower_closed, tower_fan)"
+        )
 
     def _build_sparse_issue(
         self,
@@ -96,7 +132,6 @@ class TowerFanPowerMetric(BaseMetric):
         params: List[Any],
         ctx: MetricContext,
     ) -> Optional[dict]:
-        # 用户已经精确到 system/equipment 时，不再提示全局覆盖稀疏
         if ctx.system_id or ctx.equipment_id:
             return None
 
@@ -176,13 +211,23 @@ class TowerFanPowerMetric(BaseMetric):
                 if not row or int(row["record_count"] or 0) == 0:
                     if quality_equipment_type:
                         missing_issues = self._build_missing_dependency_issues(
-                            cursor, ctx, ["power"], equipment_type=quality_equipment_type)
+                            cursor,
+                            ctx,
+                            ["power"],
+                            equipment_type=quality_equipment_type,
+                        )
                     else:
                         missing_issues = self._build_missing_dependency_issues(
-                            cursor, ctx, ["power"], equipment_types=quality_equipment_types)
+                            cursor,
+                            ctx,
+                            ["power"],
+                            equipment_types=quality_equipment_types,
+                        )
                     return CalculationResult(
-                        metric_name=self.metric_name, value=None,
-                        unit=self.unit, status="no_data",
+                        metric_name=self.metric_name,
+                        value=None,
+                        unit=self.unit,
+                        status="no_data",
                         formula=self.formula,
                         quality_score=0.0,
                         quality_issues=missing_issues,
@@ -190,16 +235,21 @@ class TowerFanPowerMetric(BaseMetric):
 
                 val = round(float(row["avg_val"] or 0), 2)
                 quality_score, quality_issues = self._check_quality_from_table(
-                    cursor, ctx, ["power"],
+                    cursor,
+                    ctx,
+                    ["power"],
                     equipment_type=quality_equipment_type,
-                    equipment_types=quality_equipment_types)
+                    equipment_types=quality_equipment_types,
+                )
 
                 sparse_issue = self._build_sparse_issue(cursor, where, params, ctx)
                 all_issues = quality_issues + ([sparse_issue] if sparse_issue else [])
 
                 return CalculationResult(
-                    metric_name=self.metric_name, value=val,
-                    unit=self.unit, status=self._status_from_issues(all_issues),
+                    metric_name=self.metric_name,
+                    value=val,
+                    unit=self.unit,
+                    status=self._status_from_issues(all_issues),
                     formula=self.formula,
                     formula_with_values=f"= AVG = {val} kW",
                     sql_executed=sql.strip(),
@@ -214,7 +264,10 @@ class TowerFanPowerMetric(BaseMetric):
                 )
         except Exception as e:
             return CalculationResult(
-                metric_name=self.metric_name, value=None, unit=self.unit,
-                status="failed", formula=self.formula,
+                metric_name=self.metric_name,
+                value=None,
+                unit=self.unit,
+                status="failed",
+                formula=self.formula,
                 quality_issues=[{"type": "error", "description": str(e)}],
             )

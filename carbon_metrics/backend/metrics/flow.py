@@ -1,12 +1,11 @@
-"""
-流量效率指标计算
-"""
-from typing import List, Any
+"""流量与制冷量指标计算。"""
+from typing import List
+
 from .base import BaseMetric, MetricContext, CalculationResult, COOLING_CAPACITY_FACTOR
 
 
 class ChilledFlowMetric(BaseMetric):
-    """冷冻水流量"""
+    """冷冻水流量。"""
 
     @property
     def metric_name(self) -> str:
@@ -38,12 +37,15 @@ class ChilledFlowMetric(BaseMetric):
                 cursor.execute(sql, params)
                 row = cursor.fetchone()
 
-                if not row or row["record_count"] == 0:
+                if not row or int(row["record_count"] or 0) == 0:
                     missing_issues = self._build_missing_dependency_issues(
-                        cursor, ctx, ["chilled_flow"])
+                        cursor, ctx, ["chilled_flow"]
+                    )
                     return CalculationResult(
-                        metric_name=self.metric_name, value=None,
-                        unit=self.unit, status="no_data",
+                        metric_name=self.metric_name,
+                        value=None,
+                        unit=self.unit,
+                        status="no_data",
                         formula=self.formula,
                         quality_score=0.0,
                         quality_issues=missing_issues,
@@ -51,30 +53,36 @@ class ChilledFlowMetric(BaseMetric):
 
                 val = round(float(row["avg_val"] or 0), 2)
                 quality_score, quality_issues = self._check_quality_from_table(
-                    cursor, ctx, ["chilled_flow"])
+                    cursor, ctx, ["chilled_flow"]
+                )
 
                 return CalculationResult(
-                    metric_name=self.metric_name, value=val,
-                    unit=self.unit, status=self._status_from_issues(quality_issues),
+                    metric_name=self.metric_name,
+                    value=val,
+                    unit=self.unit,
+                    status=self._status_from_issues(quality_issues),
                     formula=self.formula,
                     formula_with_values=f"= AVG = {val} m³/h",
                     sql_executed=sql.strip(),
-                    input_records=int(row["record_count"]),
-                    valid_records=int(row["record_count"]),
+                    input_records=int(row["record_count"] or 0),
+                    valid_records=int(row["record_count"] or 0),
                     data_source_condition="metric_name='chilled_flow'",
                     quality_score=quality_score,
                     quality_issues=quality_issues,
                 )
         except Exception as e:
             return CalculationResult(
-                metric_name=self.metric_name, value=None, unit=self.unit,
-                status="failed", formula=self.formula,
+                metric_name=self.metric_name,
+                value=None,
+                unit=self.unit,
+                status="failed",
+                formula=self.formula,
                 quality_issues=[{"type": "error", "description": str(e)}],
             )
 
 
 class CoolingFlowMetric(BaseMetric):
-    """冷却水流量"""
+    """冷却水流量。"""
 
     @property
     def metric_name(self) -> str:
@@ -106,12 +114,15 @@ class CoolingFlowMetric(BaseMetric):
                 cursor.execute(sql, params)
                 row = cursor.fetchone()
 
-                if not row or row["record_count"] == 0:
+                if not row or int(row["record_count"] or 0) == 0:
                     missing_issues = self._build_missing_dependency_issues(
-                        cursor, ctx, ["cooling_flow"])
+                        cursor, ctx, ["cooling_flow"]
+                    )
                     return CalculationResult(
-                        metric_name=self.metric_name, value=None,
-                        unit=self.unit, status="no_data",
+                        metric_name=self.metric_name,
+                        value=None,
+                        unit=self.unit,
+                        status="no_data",
                         formula=self.formula,
                         quality_score=0.0,
                         quality_issues=missing_issues,
@@ -119,30 +130,36 @@ class CoolingFlowMetric(BaseMetric):
 
                 val = round(float(row["avg_val"] or 0), 2)
                 quality_score, quality_issues = self._check_quality_from_table(
-                    cursor, ctx, ["cooling_flow"])
+                    cursor, ctx, ["cooling_flow"]
+                )
 
                 return CalculationResult(
-                    metric_name=self.metric_name, value=val,
-                    unit=self.unit, status=self._status_from_issues(quality_issues),
+                    metric_name=self.metric_name,
+                    value=val,
+                    unit=self.unit,
+                    status=self._status_from_issues(quality_issues),
                     formula=self.formula,
                     formula_with_values=f"= AVG = {val} m³/h",
                     sql_executed=sql.strip(),
-                    input_records=int(row["record_count"]),
-                    valid_records=int(row["record_count"]),
+                    input_records=int(row["record_count"] or 0),
+                    valid_records=int(row["record_count"] or 0),
                     data_source_condition="metric_name='cooling_flow'",
                     quality_score=quality_score,
                     quality_issues=quality_issues,
                 )
         except Exception as e:
             return CalculationResult(
-                metric_name=self.metric_name, value=None, unit=self.unit,
-                status="failed", formula=self.formula,
+                metric_name=self.metric_name,
+                value=None,
+                unit=self.unit,
+                status="failed",
+                formula=self.formula,
                 quality_issues=[{"type": "error", "description": str(e)}],
             )
 
 
 class CoolingCapacityMetric(BaseMetric):
-    """制冷量"""
+    """制冷量。"""
 
     @property
     def metric_name(self) -> str:
@@ -155,7 +172,10 @@ class CoolingCapacityMetric(BaseMetric):
     @property
     def formula(self) -> str:
         factor = round(COOLING_CAPACITY_FACTOR, 4)
-        return f"制冷量 = AVG(chilled_flow × (chilled_return_temp - chilled_supply_temp) × {factor})，按小时对齐"
+        return (
+            "制冷量 = AVG(chilled_flow * (chilled_return_temp - chilled_supply_temp) * "
+            f"{factor})，按小时对齐"
+        )
 
     def calculate(self, ctx: MetricContext) -> CalculationResult:
         where_flow, params_flow = self._build_where(ctx, "chilled_flow")
@@ -198,19 +218,20 @@ class CoolingCapacityMetric(BaseMetric):
 
         try:
             with self.db.cursor() as cursor:
-                cursor.execute(
-                    sql,
-                    params_flow + params_ret + params_sup + [factor, factor],
-                )
+                cursor.execute(sql, params_flow + params_ret + params_sup + [factor, factor])
                 row = cursor.fetchone()
 
-                if not row or not row["overlapped_hours"] or int(row["overlapped_hours"]) == 0:
+                if not row or int(row["overlapped_hours"] or 0) == 0:
                     missing_issues = self._build_missing_dependency_issues(
-                        cursor, ctx,
-                        ["chilled_flow", "chilled_return_temp", "chilled_supply_temp"])
+                        cursor,
+                        ctx,
+                        ["chilled_flow", "chilled_return_temp", "chilled_supply_temp"],
+                    )
                     return CalculationResult(
-                        metric_name=self.metric_name, value=None,
-                        unit=self.unit, status="no_data",
+                        metric_name=self.metric_name,
+                        value=None,
+                        unit=self.unit,
+                        status="no_data",
                         formula=self.formula,
                         quality_score=0.0,
                         quality_issues=missing_issues,
@@ -221,33 +242,42 @@ class CoolingCapacityMetric(BaseMetric):
                 ret_val = round(float(row["avg_ret"] or 0), 2)
                 sup_val = round(float(row["avg_sup"] or 0), 2)
                 delta_t = round(ret_val - sup_val, 2)
-                overlapped = int(row["overlapped_hours"])
+                overlapped = int(row["overlapped_hours"] or 0)
                 total_records = int(row["total_records"] or 0)
                 factor_display = round(factor, 4)
 
                 quality_score, quality_issues = self._check_quality_from_table(
-                    cursor, ctx,
-                    ["chilled_flow", "chilled_return_temp", "chilled_supply_temp"])
+                    cursor,
+                    ctx,
+                    ["chilled_flow", "chilled_return_temp", "chilled_supply_temp"],
+                )
 
                 return CalculationResult(
-                    metric_name=self.metric_name, value=capacity,
-                    unit=self.unit, status=self._status_from_issues(quality_issues),
+                    metric_name=self.metric_name,
+                    value=capacity,
+                    unit=self.unit,
+                    status=self._status_from_issues(quality_issues),
                     formula=self.formula,
                     formula_with_values=(
-                        f"= AVG[流量×(回水-供水)×{factor_display}] "
-                        f"(对齐{overlapped}小时) "
-                        f"≈ {flow_val}×{delta_t}×{factor_display} = {capacity} kW"
+                        f"= AVG[flow*(return-supply)*{factor_display}] "
+                        f"(aligned {overlapped}h) = {capacity} kW; "
+                        f"approx_ref={flow_val}*{delta_t}*{factor_display}"
                     ),
                     sql_executed=sql.strip(),
                     input_records=total_records,
                     valid_records=total_records,
-                    data_source_condition="metric_name IN ('chilled_flow','chilled_return_temp','chilled_supply_temp')",
+                    data_source_condition=(
+                        "metric_name IN ('chilled_flow','chilled_return_temp','chilled_supply_temp')"
+                    ),
                     quality_score=quality_score,
                     quality_issues=quality_issues,
                 )
         except Exception as e:
             return CalculationResult(
-                metric_name=self.metric_name, value=None, unit=self.unit,
-                status="failed", formula=self.formula,
+                metric_name=self.metric_name,
+                value=None,
+                unit=self.unit,
+                status="failed",
+                formula=self.formula,
                 quality_issues=[{"type": "error", "description": str(e)}],
             )
