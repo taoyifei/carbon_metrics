@@ -121,6 +121,7 @@ class MetricCoverageOverview(BaseModel):
     time_end: datetime
     summary: MetricCoverageSummary
     available_metric_counts: Dict[str, int] = Field(default_factory=dict)
+    metric_input_counts: Dict[str, int] = Field(default_factory=dict)
     missing_dependencies: List[str] = Field(default_factory=list)
     missing_dependency_counts: Dict[str, int] = Field(default_factory=dict)
     calculable_metrics: List[str] = Field(default_factory=list)

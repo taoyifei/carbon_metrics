@@ -1,4 +1,4 @@
-﻿import { useState } from 'react';
+import { useState } from 'react';
 import dayjs from 'dayjs';
 import { Alert, Divider, Space, Tag, Typography } from 'antd';
 import type { AlertProps } from 'antd';
@@ -109,6 +109,7 @@ export default function DataCoverageBanner({
 
   const { summary } = data;
   const availableEntries = topEntries(data.available_metric_counts);
+  const metricInputEntries = topEntries(data.metric_input_counts ?? {});
   const dependencyEntries = topEntries(data.missing_dependency_counts);
 
   const partialMetricNames = toMetricNames(data.items, 'partial');
@@ -186,6 +187,20 @@ export default function DataCoverageBanner({
             {availableEntries.length > 0 ? (
               <Space wrap size={[6, 6]}>
                 {availableEntries.map(([name, count]) => (
+                  <Tag key={name}>
+                    {`${name}: ${count}`}
+                  </Tag>
+                ))}
+              </Space>
+            ) : (
+              <Text type="secondary">无</Text>
+            )}
+
+            <Divider style={{ margin: '2px 0 0' }} />
+            <Text strong>业务指标输入记录（Top）</Text>
+            {metricInputEntries.length > 0 ? (
+              <Space wrap size={[6, 6]}>
+                {metricInputEntries.map(([name, count]) => (
                   <Tag key={name}>
                     {`${name}: ${count}`}
                   </Tag>

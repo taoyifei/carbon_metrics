@@ -81,6 +81,7 @@ export interface MetricCoverageOverview {
   time_end: string;
   summary: MetricCoverageSummary;
   available_metric_counts: Record<string, number>;
+  metric_input_counts: Record<string, number>;
   missing_dependencies: string[];
   missing_dependency_counts: Record<string, number>;
   calculable_metrics: string[];

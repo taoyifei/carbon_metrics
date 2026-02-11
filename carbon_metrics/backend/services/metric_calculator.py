@@ -375,8 +375,19 @@ class MetricCalculator:
         calculable_count = success_count + partial_count
         calculable_rate = round((calculable_count / total) * 100, 2) if total else 0.0
 
-        # Step 3 优化: 从已计算结果中提取，省掉全表 GROUP BY 查询
-        available_metric_counts = {
+        # 原子 metric 覆盖统计（用于 coverage banner 展示）
+        available_metric_counts = self._query_available_metric_counts(
+            time_start=time_start,
+            time_end=time_end,
+            building_id=building_id,
+            system_id=system_id,
+            equipment_type=equipment_type,
+            equipment_id=equipment_id,
+            sub_equipment_id=sub_equipment_id,
+        )
+
+        # 业务指标输入记录统计（复用已算结果，不额外查询）
+        metric_input_counts = {
             item["metric_name"]: item["input_records"]
             for item in items
             if item["input_records"] > 0
@@ -395,6 +406,7 @@ class MetricCalculator:
                 "calculable_rate": calculable_rate,
             },
             "available_metric_counts": available_metric_counts,
+            "metric_input_counts": metric_input_counts,
             "missing_dependencies": [name for name, _ in missing_counter.most_common()],
             "missing_dependency_counts": {
                 name: count for name, count in missing_counter.most_common()
