@@ -12,9 +12,12 @@ interface Props {
   data?: QualitySummary;
   isLoading: boolean;
   error: Error | null;
+  onNavigate?: (target: 'list' | 'issues', filter?: Record<string, string>) => void;
 }
 
-export default function QualitySummaryTab({ data, isLoading, error }: Props) {
+const clickable: React.CSSProperties = { cursor: 'pointer' };
+
+export default function QualitySummaryTab({ data, isLoading, error, onNavigate }: Props) {
   if (isLoading) return <LoadingCard />;
   if (error) return <ErrorAlert message={error.message} />;
   if (!data) return null;
@@ -64,7 +67,7 @@ export default function QualitySummaryTab({ data, isLoading, error }: Props) {
 
       <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
         <Col span={8}>
-          <Card>
+          <Card hoverable style={clickable} onClick={() => onNavigate?.('list', { quality_level: 'good' })}>
             <Statistic
               title="良好"
               value={data.good_count}
@@ -74,7 +77,7 @@ export default function QualitySummaryTab({ data, isLoading, error }: Props) {
           </Card>
         </Col>
         <Col span={8}>
-          <Card>
+          <Card hoverable style={clickable} onClick={() => onNavigate?.('list', { quality_level: 'warning' })}>
             <Statistic
               title="警告"
               value={data.warning_count}
@@ -84,7 +87,7 @@ export default function QualitySummaryTab({ data, isLoading, error }: Props) {
           </Card>
         </Col>
         <Col span={8}>
-          <Card>
+          <Card hoverable style={clickable} onClick={() => onNavigate?.('list', { quality_level: 'poor' })}>
             <Statistic
               title="差"
               value={data.poor_count}
@@ -97,17 +100,17 @@ export default function QualitySummaryTab({ data, isLoading, error }: Props) {
 
       <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
         <Col span={8}>
-          <Card>
+          <Card hoverable style={clickable} onClick={() => onNavigate?.('issues', { issue_type: 'gap' })}>
             <Statistic title="时间缺口" value={data.total_gaps} />
           </Card>
         </Col>
         <Col span={8}>
-          <Card>
+          <Card hoverable style={clickable} onClick={() => onNavigate?.('issues', { issue_type: 'negative' })}>
             <Statistic title="负值异常" value={data.total_negatives} />
           </Card>
         </Col>
         <Col span={8}>
-          <Card>
+          <Card hoverable style={clickable} onClick={() => onNavigate?.('issues', { issue_type: 'jump' })}>
             <Statistic title="跳变异常" value={data.total_jumps} />
           </Card>
         </Col>

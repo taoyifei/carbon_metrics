@@ -1,5 +1,6 @@
-import { Table, Select, Space } from 'antd';
+import { Table, Select, Space, Button } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
+import { DownloadOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import type {
   DataIssue,
@@ -11,6 +12,7 @@ import { EQUIPMENT_TYPE_LABELS } from '../../constants/equipmentTypes';
 import IssueTypeTag from '../../components/IssueTypeTag';
 import SeverityTag from '../../components/SeverityTag';
 import ErrorAlert from '../../components/ErrorAlert';
+import { exportToCsv } from '../../utils/exportCsv';
 
 interface Props {
   data?: PaginatedResponse<DataIssue>;
@@ -87,6 +89,24 @@ export default function IssuesTab({
 }: Props) {
   if (error) return <ErrorAlert message={error.message} />;
 
+  const handleExport = () => {
+    if (!data?.items?.length) return;
+    exportToCsv(
+      `异常问题_${dayjs().format('YYYYMMDD_HHmm')}.csv`,
+      [
+        { title: '时间', dataIndex: 'bucket_time', render: (v) => dayjs(v as string).format('YYYY-MM-DD HH:mm') },
+        { title: '设备类型', dataIndex: 'equipment_type', render: (v) => EQUIPMENT_TYPE_LABELS[v as string] ?? (v as string) },
+        { title: '设备ID', dataIndex: 'equipment_id' },
+        { title: '指标', dataIndex: 'metric_name' },
+        { title: '问题类型', dataIndex: 'issue_type' },
+        { title: '严重程度', dataIndex: 'severity' },
+        { title: '描述', dataIndex: 'description' },
+        { title: '数量', dataIndex: 'count' },
+      ],
+      data.items,
+    );
+  };
+
   return (
     <div>
       <Space style={{ marginBottom: 16 }}>
@@ -115,6 +135,9 @@ export default function IssuesTab({
             { value: 'low', label: '轻微' },
           ]}
         />
+        <Button icon={<DownloadOutlined />} onClick={handleExport} disabled={!data?.items?.length}>
+          导出 CSV
+        </Button>
       </Space>
 
       <Table<DataIssue>

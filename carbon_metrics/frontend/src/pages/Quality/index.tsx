@@ -22,6 +22,8 @@ import EquipmentTab from './EquipmentTab';
 
 export default function QualityPage() {
   const [timeRange, setTimeRange] = useGlobalTimeRange(7);
+  const [buildingId, setBuildingId] = useState<string>();
+  const [systemId, setSystemId] = useState<string>();
   const [equipmentType, setEquipmentType] = useState<string>();
   const [qualityLevel, setQualityLevel] = useState<QualityLevel>();
   const [granularity, setGranularity] = useState<Granularity>('hour');
@@ -41,11 +43,13 @@ export default function QualityPage() {
     () => ({
       time_start: timeRange[0],
       time_end: timeRange[1],
+      building_id: buildingId,
+      system_id: systemId,
       equipment_type: equipmentType,
       quality_level: qualityLevel,
       granularity,
     }),
-    [equipmentType, granularity, qualityLevel, timeRange],
+    [buildingId, systemId, equipmentType, granularity, qualityLevel, timeRange],
   );
 
   const summaryQuery = useQualitySummary(
@@ -81,13 +85,15 @@ export default function QualityPage() {
 
   useEffect(() => {
     setListPage(1);
-  }, [timeRange[0], timeRange[1], equipmentType, qualityLevel, granularity]);
+  }, [timeRange[0], timeRange[1], buildingId, systemId, equipmentType, qualityLevel, granularity]);
 
   useEffect(() => {
     setIssuesPage(1);
   }, [
     timeRange[0],
     timeRange[1],
+    buildingId,
+    systemId,
     equipmentType,
     qualityLevel,
     granularity,
@@ -95,12 +101,35 @@ export default function QualityPage() {
     severity,
   ]);
 
+  /** Summary 卡片点击联动 */
+  const handleSummaryNavigate = (
+    target: 'list' | 'issues',
+    filter?: Record<string, string>,
+  ) => {
+    if (target === 'list' && filter?.quality_level) {
+      setQualityLevel(filter.quality_level as QualityLevel);
+      setActiveTab('list');
+      setListPage(1);
+    } else if (target === 'issues' && filter?.issue_type) {
+      setIssueType(filter.issue_type as IssueType);
+      setSeverity(undefined);
+      setActiveTab('issues');
+      setIssuesPage(1);
+    }
+  };
+
   return (
     <div>
       <Card style={{ marginBottom: 16 }}>
         <Space direction="vertical" size="middle" style={{ width: '100%' }}>
           <TimeRangeSelector value={timeRange} onChange={setTimeRange} />
           <FilterBar
+            buildingId={buildingId}
+            onBuildingIdChange={setBuildingId}
+            systemId={systemId}
+            onSystemIdChange={setSystemId}
+            showBuildingId
+            showSystemId
             equipmentType={equipmentType}
             onEquipmentTypeChange={setEquipmentType}
             qualityLevel={qualityLevel}
@@ -126,6 +155,7 @@ export default function QualityPage() {
                   data={summaryQuery.data}
                   isLoading={summaryQuery.isLoading}
                   error={summaryQuery.error}
+                  onNavigate={handleSummaryNavigate}
                 />
               ),
             },

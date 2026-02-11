@@ -1,11 +1,13 @@
-import { Table } from 'antd';
+import { Table, Button, Space } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
+import { DownloadOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import type { QualityRecord, PaginatedResponse } from '../../api/types';
 import { EQUIPMENT_TYPE_LABELS } from '../../constants/equipmentTypes';
 import QualityBadge from '../../components/QualityBadge';
 import QualityScoreTag from '../../components/QualityScoreTag';
 import ErrorAlert from '../../components/ErrorAlert';
+import { exportToCsv } from '../../utils/exportCsv';
 
 interface Props {
   data?: PaginatedResponse<QualityRecord>;
@@ -86,24 +88,51 @@ export default function QualityListTab({
 }: Props) {
   if (error) return <ErrorAlert message={error.message} />;
 
+  const handleExport = () => {
+    if (!data?.items?.length) return;
+    exportToCsv(
+      `质量明细_${dayjs().format('YYYYMMDD_HHmm')}.csv`,
+      [
+        { title: '时间', dataIndex: 'bucket_time', render: (v) => dayjs(v as string).format('YYYY-MM-DD HH:mm') },
+        { title: '设备类型', dataIndex: 'equipment_type', render: (v) => EQUIPMENT_TYPE_LABELS[v as string] ?? (v as string) },
+        { title: '设备ID', dataIndex: 'equipment_id' },
+        { title: '指标', dataIndex: 'metric_name' },
+        { title: '质量分', dataIndex: 'quality_score' },
+        { title: '等级', dataIndex: 'quality_level' },
+        { title: '完整率', dataIndex: 'completeness_rate', render: (v) => `${(v as number).toFixed(1)}%` },
+        { title: '缺口', dataIndex: 'gap_count' },
+        { title: '负值', dataIndex: 'negative_count' },
+        { title: '跳变', dataIndex: 'jump_count' },
+      ],
+      data.items,
+    );
+  };
+
   return (
-    <Table<QualityRecord>
-      columns={columns}
-      dataSource={data?.items}
-      loading={isLoading}
-      rowKey={(r) =>
-        `${r.bucket_time}-${r.building_id}-${r.system_id}-${r.equipment_type}-${r.equipment_id}-${r.sub_equipment_id}-${r.metric_name}`
-      }
-      pagination={{
-        current: page,
-        pageSize,
-        total: data?.total ?? 0,
-        showSizeChanger: true,
-        showTotal: (total) => `共 ${total} 条`,
-        onChange: onPageChange,
-      }}
-      scroll={{ x: 1100 }}
-      size="middle"
-    />
+    <div>
+      <Space style={{ marginBottom: 16 }}>
+        <Button icon={<DownloadOutlined />} onClick={handleExport} disabled={!data?.items?.length}>
+          导出 CSV
+        </Button>
+      </Space>
+      <Table<QualityRecord>
+        columns={columns}
+        dataSource={data?.items}
+        loading={isLoading}
+        rowKey={(r) =>
+          `${r.bucket_time}-${r.building_id}-${r.system_id}-${r.equipment_type}-${r.equipment_id}-${r.sub_equipment_id}-${r.metric_name}`
+        }
+        pagination={{
+          current: page,
+          pageSize,
+          total: data?.total ?? 0,
+          showSizeChanger: true,
+          showTotal: (total) => `共 ${total} 条`,
+          onChange: onPageChange,
+        }}
+        scroll={{ x: 1100 }}
+        size="middle"
+      />
+    </div>
   );
 }
