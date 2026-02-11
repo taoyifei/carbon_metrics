@@ -8,6 +8,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional, List, Tuple, Dict, Any
 
+# 制冷量转换系数: Q(kW) = flow(m³/h) × ΔT(℃) × c_p(kJ/kg·K) / 3.6
+# c_p = 4.186 kJ/(kg·K), 除以 3.6 将 kJ/h 转为 kW
+COOLING_CAPACITY_FACTOR = 4.186 / 3.6
+
 
 @dataclass
 class MetricContext:

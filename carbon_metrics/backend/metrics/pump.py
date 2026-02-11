@@ -45,7 +45,7 @@ class _PumpFrequencyMetric(BaseMetric):
                         quality_issues=missing_issues,
                     )
 
-                val = round(float(row["avg_val"]), 2)
+                val = round(float(row["avg_val"] or 0), 2)
                 quality_score, quality_issues = self._check_quality_from_table(
                     cursor, ctx, ["frequency"], equipment_type=self._equipment_type)
 

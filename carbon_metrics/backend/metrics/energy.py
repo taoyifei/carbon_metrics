@@ -581,7 +581,7 @@ class _EnergyRatioBase(BaseMetric):
                 }]
                 return CalculationResult(
                     metric_name=self.metric_name,
-                    value=0.0,
+                    value=None,
                     unit=self.unit,
                     status="partial",
                     formula=self.formula,

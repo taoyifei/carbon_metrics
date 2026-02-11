@@ -2,10 +2,10 @@
 import os
 from typing import Any, List, Optional
 
-from .base import BaseMetric, MetricContext, CalculationResult
+from .base import BaseMetric, MetricContext, CalculationResult, COOLING_CAPACITY_FACTOR
 
 LOAD_METRIC_CANDIDATES = ["load_rate", "load_ratio"]
-COP_CAPACITY_FACTOR = 4.186 / 3.6
+COP_CAPACITY_FACTOR = COOLING_CAPACITY_FACTOR
 DEFAULT_COP_MIN_POWER_KW = 20.0
 
 
@@ -515,7 +515,7 @@ class ChillerCopMetric(BaseMetric):
 
                 quality_score_system, quality_issues_system = self._check_quality_from_table(
                     cursor,
-                    ctx,
+                    water_ctx,
                     ["chilled_flow", "chilled_return_temp", "chilled_supply_temp"],
                 )
                 quality_score_power, quality_issues_power = self._check_quality_from_table(

@@ -2,7 +2,7 @@
 流量效率指标计算
 """
 from typing import List, Any
-from .base import BaseMetric, MetricContext, CalculationResult
+from .base import BaseMetric, MetricContext, CalculationResult, COOLING_CAPACITY_FACTOR
 
 
 class ChilledFlowMetric(BaseMetric):
@@ -49,7 +49,7 @@ class ChilledFlowMetric(BaseMetric):
                         quality_issues=missing_issues,
                     )
 
-                val = round(float(row["avg_val"]), 2)
+                val = round(float(row["avg_val"] or 0), 2)
                 quality_score, quality_issues = self._check_quality_from_table(
                     cursor, ctx, ["chilled_flow"])
 
@@ -117,7 +117,7 @@ class CoolingFlowMetric(BaseMetric):
                         quality_issues=missing_issues,
                     )
 
-                val = round(float(row["avg_val"]), 2)
+                val = round(float(row["avg_val"] or 0), 2)
                 quality_score, quality_issues = self._check_quality_from_table(
                     cursor, ctx, ["cooling_flow"])
 
@@ -154,29 +154,57 @@ class CoolingCapacityMetric(BaseMetric):
 
     @property
     def formula(self) -> str:
-        return "制冷量 = chilled_flow × (chilled_return_temp - chilled_supply_temp) × 1.163"
+        factor = round(COOLING_CAPACITY_FACTOR, 4)
+        return f"制冷量 = AVG(chilled_flow × (chilled_return_temp - chilled_supply_temp) × {factor})，按小时对齐"
 
     def calculate(self, ctx: MetricContext) -> CalculationResult:
         where_flow, params_flow = self._build_where(ctx, "chilled_flow")
         where_ret, params_ret = self._build_where(ctx, "chilled_return_temp")
         where_sup, params_sup = self._build_where(ctx, "chilled_supply_temp")
 
-        sql_flow = f"SELECT AVG(agg_avg) AS v, COUNT(*) AS n FROM agg_hour WHERE {where_flow}"
-        sql_ret = f"SELECT AVG(agg_avg) AS v, COUNT(*) AS n FROM agg_hour WHERE {where_ret}"
-        sql_sup = f"SELECT AVG(agg_avg) AS v, COUNT(*) AS n FROM agg_hour WHERE {where_sup}"
+        factor = COOLING_CAPACITY_FACTOR
+
+        sql = f"""
+            WITH flow_hour AS (
+                SELECT bucket_time, AVG(agg_avg) AS flow_avg, COUNT(*) AS cnt
+                FROM agg_hour
+                WHERE {where_flow}
+                GROUP BY bucket_time
+            ),
+            ret_hour AS (
+                SELECT bucket_time, AVG(agg_avg) AS ret_avg, COUNT(*) AS cnt
+                FROM agg_hour
+                WHERE {where_ret}
+                GROUP BY bucket_time
+            ),
+            sup_hour AS (
+                SELECT bucket_time, AVG(agg_avg) AS sup_avg, COUNT(*) AS cnt
+                FROM agg_hour
+                WHERE {where_sup}
+                GROUP BY bucket_time
+            )
+            SELECT
+                COUNT(*) AS overlapped_hours,
+                AVG(fh.flow_avg * (rh.ret_avg - sh.sup_avg) * %s) AS avg_capacity,
+                SUM(fh.flow_avg * (rh.ret_avg - sh.sup_avg) * %s) AS total_capacity,
+                AVG(fh.flow_avg) AS avg_flow,
+                AVG(rh.ret_avg) AS avg_ret,
+                AVG(sh.sup_avg) AS avg_sup,
+                SUM(fh.cnt) + SUM(rh.cnt) + SUM(sh.cnt) AS total_records
+            FROM flow_hour fh
+            JOIN ret_hour rh ON rh.bucket_time = fh.bucket_time
+            JOIN sup_hour sh ON sh.bucket_time = fh.bucket_time
+        """
 
         try:
             with self.db.cursor() as cursor:
-                cursor.execute(sql_flow, params_flow)
-                r_flow = cursor.fetchone()
-                cursor.execute(sql_ret, params_ret)
-                r_ret = cursor.fetchone()
-                cursor.execute(sql_sup, params_sup)
-                r_sup = cursor.fetchone()
+                cursor.execute(
+                    sql,
+                    params_flow + params_ret + params_sup + [factor, factor],
+                )
+                row = cursor.fetchone()
 
-                if (not r_flow or r_flow["n"] == 0
-                        or not r_ret or r_ret["n"] == 0
-                        or not r_sup or r_sup["n"] == 0):
+                if not row or not row["overlapped_hours"] or int(row["overlapped_hours"]) == 0:
                     missing_issues = self._build_missing_dependency_issues(
                         cursor, ctx,
                         ["chilled_flow", "chilled_return_temp", "chilled_supply_temp"])
@@ -188,12 +216,15 @@ class CoolingCapacityMetric(BaseMetric):
                         quality_issues=missing_issues,
                     )
 
-                flow_val = round(float(r_flow["v"]), 2)
-                ret_val = round(float(r_ret["v"]), 2)
-                sup_val = round(float(r_sup["v"]), 2)
+                capacity = round(float(row["avg_capacity"] or 0), 2)
+                flow_val = round(float(row["avg_flow"] or 0), 2)
+                ret_val = round(float(row["avg_ret"] or 0), 2)
+                sup_val = round(float(row["avg_sup"] or 0), 2)
                 delta_t = round(ret_val - sup_val, 2)
-                capacity = round(flow_val * delta_t * 1.163, 2)
-                total_records = int(r_flow["n"]) + int(r_ret["n"]) + int(r_sup["n"])
+                overlapped = int(row["overlapped_hours"])
+                total_records = int(row["total_records"] or 0)
+                factor_display = round(factor, 4)
+
                 quality_score, quality_issues = self._check_quality_from_table(
                     cursor, ctx,
                     ["chilled_flow", "chilled_return_temp", "chilled_supply_temp"])
@@ -203,10 +234,11 @@ class CoolingCapacityMetric(BaseMetric):
                     unit=self.unit, status=self._status_from_issues(quality_issues),
                     formula=self.formula,
                     formula_with_values=(
-                        f"= {flow_val} m³/h × ({ret_val} - {sup_val})℃ × 1.163"
-                        f" = {flow_val} × {delta_t} × 1.163 = {capacity} kW"
+                        f"= AVG[流量×(回水-供水)×{factor_display}] "
+                        f"(对齐{overlapped}小时) "
+                        f"≈ {flow_val}×{delta_t}×{factor_display} = {capacity} kW"
                     ),
-                    sql_executed=f"{sql_flow.strip()}; {sql_ret.strip()}; {sql_sup.strip()}",
+                    sql_executed=sql.strip(),
                     input_records=total_records,
                     valid_records=total_records,
                     data_source_condition="metric_name IN ('chilled_flow','chilled_return_temp','chilled_supply_temp')",

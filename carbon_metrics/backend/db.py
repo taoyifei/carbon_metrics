@@ -114,11 +114,14 @@ class Database:
 
 # 全局数据库实例
 _db_instance: Database = None
+_db_lock = threading.Lock()
 
 
 def get_db() -> Database:
     """获取全局数据库实例"""
     global _db_instance
     if _db_instance is None:
-        _db_instance = Database()
+        with _db_lock:
+            if _db_instance is None:
+                _db_instance = Database()
     return _db_instance

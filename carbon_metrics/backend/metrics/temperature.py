@@ -44,7 +44,7 @@ class _SingleTempMetric(BaseMetric):
                         quality_issues=missing_issues,
                     )
 
-                val = round(float(row["avg_val"]), 2)
+                val = round(float(row["avg_val"] or 0), 2)
                 quality_score, quality_issues = self._check_quality_from_table(
                     cursor, ctx, [self._metric_name_db])
 
@@ -175,8 +175,8 @@ class ChilledWaterDeltaTMetric(BaseMetric):
                         quality_issues=missing_issues,
                     )
 
-                ret_val = round(float(r_ret["v"]), 2)
-                sup_val = round(float(r_sup["v"]), 2)
+                ret_val = round(float(r_ret["v"] or 0), 2)
+                sup_val = round(float(r_sup["v"] or 0), 2)
                 delta = round(ret_val - sup_val, 2)
                 total_records = int(r_ret["n"]) + int(r_sup["n"])
                 quality_score, quality_issues = self._check_quality_from_table(
