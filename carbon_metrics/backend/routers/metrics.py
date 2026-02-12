@@ -1,8 +1,14 @@
 """
 指标计算 API 路由
 """
+import copy
+import logging
+import os
+import threading
+import time
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional, List
+from typing import Any, Optional, List, Tuple
 from fastapi import APIRouter, Query, HTTPException
 
 from ..services import MetricCalculator
@@ -18,6 +24,103 @@ from ..models import (
 )
 
 router = APIRouter(prefix="/metrics", tags=["指标计算"])
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _MetricCacheEntry:
+    expire_at: float
+    data_version: Tuple[Any, ...]
+    value: Any
+
+
+_CACHE_LOCK = threading.Lock()
+_METRIC_API_CACHE: dict[Tuple[Any, ...], _MetricCacheEntry] = {}
+_MAX_CACHE_SIZE = 512
+
+
+def _resolve_metric_cache_ttl_seconds() -> int:
+    raw = os.getenv("METRIC_API_CACHE_TTL_SECONDS", "30").strip()
+    try:
+        ttl = int(raw)
+    except (TypeError, ValueError):
+        logger.warning("Invalid METRIC_API_CACHE_TTL_SECONDS=%r, fallback to 30", raw)
+        return 30
+    return max(0, ttl)
+
+
+def _prune_metric_api_cache(now_ts: float) -> None:
+    if len(_METRIC_API_CACHE) <= _MAX_CACHE_SIZE:
+        return
+    expired_keys = [
+        key
+        for key, entry in _METRIC_API_CACHE.items()
+        if entry.expire_at <= now_ts
+    ]
+    for key in expired_keys:
+        _METRIC_API_CACHE.pop(key, None)
+    if len(_METRIC_API_CACHE) <= _MAX_CACHE_SIZE:
+        return
+    # 超限时按过期时间淘汰最旧条目，避免缓存无界增长
+    oldest = sorted(
+        _METRIC_API_CACHE.items(),
+        key=lambda item: item[1].expire_at,
+    )
+    for key, _ in oldest[: max(1, len(_METRIC_API_CACHE) - _MAX_CACHE_SIZE)]:
+        _METRIC_API_CACHE.pop(key, None)
+
+
+def _load_data_version(calculator: MetricCalculator) -> Tuple[Any, ...] | None:
+    sql = """
+        SELECT
+            (SELECT COALESCE(MAX(id), 0) FROM agg_hour) AS agg_hour_max_id,
+            (SELECT COALESCE(DATE_FORMAT(MAX(bucket_time), '%%Y-%%m-%%d %%H:%%i:%%s'), '') FROM agg_hour) AS agg_hour_max_bucket,
+            (SELECT COALESCE(MAX(id), 0) FROM agg_hour_quality) AS quality_max_id,
+            (SELECT COALESCE(DATE_FORMAT(MAX(bucket_time), '%%Y-%%m-%%d %%H:%%i:%%s'), '') FROM agg_hour_quality) AS quality_max_bucket
+    """
+    try:
+        with calculator.db.cursor() as cursor:
+            cursor.execute(sql)
+            row = cursor.fetchone() or {}
+    except Exception as exc:
+        logger.warning("metric cache disabled for this request: failed to query data version: %s", exc)
+        return None
+    return (
+        int(row.get("agg_hour_max_id") or 0),
+        str(row.get("agg_hour_max_bucket") or ""),
+        int(row.get("quality_max_id") or 0),
+        str(row.get("quality_max_bucket") or ""),
+    )
+
+
+def _cache_get(cache_key: Tuple[Any, ...], data_version: Tuple[Any, ...] | None) -> Any | None:
+    ttl = _resolve_metric_cache_ttl_seconds()
+    if ttl <= 0 or data_version is None:
+        return None
+    now_ts = time.time()
+    with _CACHE_LOCK:
+        entry = _METRIC_API_CACHE.get(cache_key)
+        if not entry:
+            return None
+        if entry.expire_at <= now_ts or entry.data_version != data_version:
+            _METRIC_API_CACHE.pop(cache_key, None)
+            return None
+        return copy.deepcopy(entry.value)
+
+
+def _cache_set(cache_key: Tuple[Any, ...], data_version: Tuple[Any, ...] | None, value: Any) -> None:
+    ttl = _resolve_metric_cache_ttl_seconds()
+    if ttl <= 0 or data_version is None:
+        return
+    now_ts = time.time()
+    entry = _MetricCacheEntry(
+        expire_at=now_ts + ttl,
+        data_version=data_version,
+        value=copy.deepcopy(value),
+    )
+    with _CACHE_LOCK:
+        _METRIC_API_CACHE[cache_key] = entry
+        _prune_metric_api_cache(now_ts)
 
 
 def _to_metric_result(
@@ -75,6 +178,23 @@ def calculate_metric(
         raise HTTPException(status_code=400, detail="开始时间必须小于结束时间")
 
     calculator = MetricCalculator()
+    data_version = _load_data_version(calculator)
+    cache_key = (
+        "calculate",
+        metric_name,
+        time_start.isoformat(),
+        time_end.isoformat(),
+        building_id or "",
+        system_id or "",
+        equipment_type or "",
+        equipment_id or "",
+        sub_equipment_id or "",
+        True,  # include_dependency_diagnostics
+    )
+    cached = _cache_get(cache_key, data_version)
+    if cached is not None:
+        return cached
+
     result = calculator.calculate(
         metric_name=metric_name,
         time_start=time_start,
@@ -86,7 +206,11 @@ def calculate_metric(
         sub_equipment_id=sub_equipment_id,
         include_dependency_diagnostics=True,
     )
-    return _to_metric_result(time_start, time_end, result)
+    payload = _to_metric_result(time_start, time_end, result)
+    # 失败通常是瞬时错误，不缓存失败态，避免放大短时故障影响
+    if result.status != "failed":
+        _cache_set(cache_key, data_version, payload)
+    return payload
 
 
 @router.get("/coverage", response_model=MetricCoverageOverview)
@@ -105,7 +229,23 @@ def get_metric_coverage(
         raise HTTPException(status_code=400, detail="开始时间必须小于结束时间")
 
     calculator = MetricCalculator()
-    return calculator.coverage_overview(
+    data_version = _load_data_version(calculator)
+    cache_key = (
+        "coverage",
+        tuple(metric_names) if metric_names else (),
+        time_start.isoformat(),
+        time_end.isoformat(),
+        building_id or "",
+        system_id or "",
+        equipment_type or "",
+        equipment_id or "",
+        sub_equipment_id or "",
+    )
+    cached = _cache_get(cache_key, data_version)
+    if cached is not None:
+        return cached
+
+    payload = calculator.coverage_overview(
         metric_names=metric_names,
         time_start=time_start,
         time_end=time_end,
@@ -115,6 +255,8 @@ def get_metric_coverage(
         equipment_id=equipment_id,
         sub_equipment_id=sub_equipment_id,
     )
+    _cache_set(cache_key, data_version, payload)
+    return payload
 
 
 @router.post("/calculate_batch", response_model=MetricBatchResponse)

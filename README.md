@@ -214,6 +214,7 @@ src/
 - `DB_READ_TIMEOUT`：读取超时（秒，正整数）
 - `DB_WRITE_TIMEOUT`：写入超时（秒，正整数）
 - `METRIC_CALC_WORKERS`：指标批量计算并行线程数（1-16，默认 4）
+- `METRIC_API_CACHE_TTL_SECONDS`：指标接口响应缓存秒数（默认 `30`，`0` 表示关闭）
 - `NEGATIVE_DELTA_CLAMP_THRESHOLD`：负增量小噪声归零阈值（浮点数，默认 `0.1`）
 - `SENSOR_BIAS_POINT_BLACKLIST`：传感器偏置黑名单关键词（逗号分隔，默认 `A3_GYK1113`）
 - `SENSOR_BIAS_MIN_NEGATIVE_COUNT`：命中黑名单后触发告警的最小负值条数（默认 `20`）
@@ -223,6 +224,7 @@ src/
 - `DB_PORT` 非法时会回退到 `3306`。
 - 超时变量未配置时保持默认连接行为。
 - `METRIC_CALC_WORKERS=1` 时会走串行计算并启用共享查询缓存；>1 时走并行计算。
+- `METRIC_API_CACHE_TTL_SECONDS` 仅缓存 `/api/metrics/calculate` 与 `/api/metrics/coverage` 响应；计算公式和口径不变。缓存会结合 `agg_hour`/`agg_hour_quality` 的最新版本信息自动失效。
 - `NEGATIVE_DELTA_CLAMP_THRESHOLD` 用于区分小负值与严重负值；两者都会从 SUM 中剔除，严重负值会额外告警。
 - `SENSOR_BIAS_POINT_BLACKLIST` 用于标记重点关注点位，命中后会输出 `sensor_bias` 质量告警。
 - `冷机COP` 分母口径使用冷机主功率（`sub_equipment_id in (NULL,'','main')`），不与 `backup` 混算。
