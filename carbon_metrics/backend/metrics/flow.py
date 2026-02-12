@@ -66,7 +66,7 @@ class ChilledFlowMetric(BaseMetric):
                     sql_executed=sql.strip(),
                     input_records=int(row["record_count"] or 0),
                     valid_records=int(row["record_count"] or 0),
-                    data_source_condition="metric_name='chilled_flow'",
+                    data_source_condition=where,
                     quality_score=quality_score,
                     quality_issues=quality_issues,
                 )
@@ -143,7 +143,7 @@ class CoolingFlowMetric(BaseMetric):
                     sql_executed=sql.strip(),
                     input_records=int(row["record_count"] or 0),
                     valid_records=int(row["record_count"] or 0),
-                    data_source_condition="metric_name='cooling_flow'",
+                    data_source_condition=where,
                     quality_score=quality_score,
                     quality_issues=quality_issues,
                 )
@@ -267,7 +267,10 @@ class CoolingCapacityMetric(BaseMetric):
                     input_records=total_records,
                     valid_records=total_records,
                     data_source_condition=(
-                        "metric_name IN ('chilled_flow','chilled_return_temp','chilled_supply_temp')"
+                        f"flow: {where_flow}; "
+                        f"return: {where_ret}; "
+                        f"supply: {where_sup}; "
+                        "join_on: bucket_time"
                     ),
                     quality_score=quality_score,
                     quality_issues=quality_issues,
