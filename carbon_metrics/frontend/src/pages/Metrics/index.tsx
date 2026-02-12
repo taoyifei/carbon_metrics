@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { Alert, Button, Card, Empty, Menu, Radio, Space } from 'antd';
 import { ReloadOutlined } from '@ant-design/icons';
+import dayjs from 'dayjs';
 import { METRIC_CATEGORIES } from '../../constants/metricCategories';
 import { getMetricFilterConfig } from '../../constants/metricFilterConfig';
 import {
@@ -60,6 +61,7 @@ export default function MetricsPage() {
   const [equipmentType, setEquipmentType] = useState<string | undefined>();
   const [equipmentId, setEquipmentId] = useState<string | undefined>();
   const [subEquipmentScope, setSubEquipmentScope] = useState<SubEquipmentScope>(initSubScope);
+  const [coverageRequested, setCoverageRequested] = useState(false);
 
   const updateSearchParams = (
     category: string,
@@ -116,6 +118,17 @@ export default function MetricsPage() {
     ],
   );
 
+  const isLongRange = useMemo(
+    () => dayjs(timeRange[1]).diff(dayjs(timeRange[0]), 'day', true) > 31,
+    [timeRange],
+  );
+
+  useEffect(() => {
+    setCoverageRequested(false);
+  }, [JSON.stringify(currentFilters), isLongRange]);
+
+  const coverageEnabled = !isLongRange || coverageRequested;
+
   const singleMetricQuery = useMetricCalculate(
     selectedMetric,
     currentFilters,
@@ -127,7 +140,7 @@ export default function MetricsPage() {
     [...SPLIT_SUB_EQUIPMENT_SCOPES],
     isSplitMode,
   );
-  const metricCoverageQuery = useMetricCoverage(currentFilters);
+  const metricCoverageQuery = useMetricCoverage(currentFilters, coverageEnabled);
 
   const splitErrorRaw = isSplitMode
     ? splitMetricQueries.find((query) => query.error)?.error
@@ -255,6 +268,8 @@ export default function MetricsPage() {
           data={metricCoverageQuery.data}
           isLoading={metricCoverageQuery.isLoading}
           errorMessage={metricCoverageQuery.error?.message}
+          deferredLoad={isLongRange && !coverageRequested}
+          onRequestLoad={() => setCoverageRequested(true)}
         />
 
         <Card size="small" style={{ marginBottom: 16 }}>

@@ -10,6 +10,8 @@ interface Props {
   data?: MetricCoverageOverview;
   isLoading?: boolean;
   errorMessage?: string;
+  deferredLoad?: boolean;
+  onRequestLoad?: () => void;
 }
 
 const MAX_ITEMS = 30;
@@ -77,6 +79,8 @@ export default function DataCoverageBanner({
   data,
   isLoading = false,
   errorMessage,
+  deferredLoad = false,
+  onRequestLoad,
 }: Props) {
   const [expanded, setExpanded] = useState(false);
 
@@ -88,6 +92,25 @@ export default function DataCoverageBanner({
         style={{ marginBottom: 12 }}
         message="数据覆盖概览获取失败"
         description={errorMessage}
+      />
+    );
+  }
+
+  if (deferredLoad && !data) {
+    return (
+      <Alert
+        type="info"
+        showIcon
+        style={{ marginBottom: 12 }}
+        message="当前时间范围超过31天，已跳过自动覆盖评估"
+        description={(
+          <Space size={8} wrap>
+            <Text type="secondary">为减少大范围计算耗时，请按需加载覆盖概览。</Text>
+            {onRequestLoad && (
+              <Link onClick={onRequestLoad}>展开详情</Link>
+            )}
+          </Space>
+        )}
       />
     );
   }
