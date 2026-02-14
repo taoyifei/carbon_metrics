@@ -6,6 +6,8 @@ import {
   calculateMetricBatch,
   fetchMetricCoverage,
   fetchEquipmentIds,
+  fetchSubEquipmentScopes,
+  type SubEquipmentScopeFilters,
 } from '../api/metricsApi';
 import type { CommonFilters } from '../api/types';
 
@@ -62,6 +64,18 @@ export function useEquipmentIds(equipmentType?: string, enabled = true) {
     queryFn: () => fetchEquipmentIds(equipmentType),
     enabled,
     staleTime: 5 * 60 * 1000,
+  });
+}
+
+export function useSubEquipmentScopes(
+  filters: SubEquipmentScopeFilters,
+  enabled = true,
+) {
+  return useQuery({
+    queryKey: ['equipment', 'sub_scopes', filters],
+    queryFn: () => fetchSubEquipmentScopes(filters),
+    enabled,
+    staleTime: 3 * 60 * 1000,
   });
 }
 

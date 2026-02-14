@@ -2,7 +2,7 @@ import { useMemo } from 'react';
 import { Row, Col, Card, Typography, Space, Spin, Tag, Tooltip } from 'antd';
 import { useNavigate } from 'react-router-dom';
 import type { MetricResult, MetricStatus } from '../../api/types';
-import { METRIC_CATEGORIES } from '../../constants/metricCategories';
+import { VISIBLE_METRIC_CATEGORIES } from '../../constants/metricCategories';
 import { useMetricBatchCalculate } from '../../hooks/useMetrics';
 
 const { Text, Link } = Typography;
@@ -41,7 +41,7 @@ export default function MetricCategoryCards({ timeRange }: Props) {
   const navigate = useNavigate();
 
   const allMetrics = useMemo(
-    () => METRIC_CATEGORIES.flatMap((cat) => cat.metrics),
+    () => VISIBLE_METRIC_CATEGORIES.flatMap((cat) => cat.metrics),
     [],
   );
 
@@ -63,7 +63,7 @@ export default function MetricCategoryCards({ timeRange }: Props) {
 
   return (
     <Row gutter={[16, 16]}>
-      {METRIC_CATEGORIES.map((cat) => (
+      {VISIBLE_METRIC_CATEGORIES.map((cat) => (
         <Col xs={24} sm={12} lg={6} key={cat.key}>
           <Card title={cat.label} size="small" style={{ height: '100%' }}>
             <Space direction="vertical" size={6} style={{ width: '100%' }}>

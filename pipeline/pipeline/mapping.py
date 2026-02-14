@@ -61,6 +61,50 @@ def _extract_index(text: str, pattern: str) -> Optional[str]:
     return f"{int(m.group(1)):02d}"
 
 
+def _extract_index_with_patterns(text: str, patterns: List[str]) -> Optional[str]:
+    for pattern in patterns:
+        idx = _extract_index(text, pattern)
+        if idx:
+            return idx
+    return None
+
+
+def _extract_chiller_no(text: str) -> Optional[str]:
+    # Cover chiller id variants: 1_no, no1, 1#, and 1_prefix forms.
+    patterns = [
+        r"(\d+)号冷机",
+        r"(\d+)#冷机",
+        r"冷机(\d+)",
+        r"(?:^|[.])(\d+)_冷机",
+        r"(?:^|[.])(\d+)_冷机电流百分比",
+        r"(?:^|[.])(\d+)_冷机累计运行时间",
+    ]
+    chiller_no = _extract_index_with_patterns(text, patterns)
+    if chiller_no:
+        return chiller_no
+
+    for segment in reversed([seg for seg in text.split(".") if seg]):
+        if "冷机" not in segment:
+            continue
+        m = re.match(r"(\d+)[_#号]", segment)
+        if m:
+            return f"{int(m.group(1)):02d}"
+    return None
+
+
+def _extract_pump_no(text: str) -> Optional[str]:
+    patterns = [
+        r"(\d+)号冷冻",
+        r"(\d+)号冷却",
+        r"(\d+)#冷冻",
+        r"(\d+)#冷却",
+        r"冷冻水泵(\d+)",
+        r"冷却水泵(\d+)",
+        r"(\d+)号",
+    ]
+    return _extract_index_with_patterns(text, patterns)
+
+
 def parse_tag_name(tag_name: str) -> MappingResult:
     """Parse tag_name into standard hierarchy + metric_name."""
     if not tag_name:
@@ -78,7 +122,7 @@ def parse_tag_name(tag_name: str) -> MappingResult:
 
     if "频率" in compact:
         metric_name = "frequency"
-        pump_no = _extract_index(compact, r"(\d+)号")
+        pump_no = _extract_pump_no(compact)
         if "冷冻泵" in compact or "冷冻水泵" in compact:
             equipment_type = "chilled_pump"
         elif "冷却泵" in compact or "冷却水泵" in compact:
@@ -92,7 +136,7 @@ def parse_tag_name(tag_name: str) -> MappingResult:
     elif "电流百分比" in compact or "负载率" in compact or "负荷率" in compact:
         metric_name = "load_rate"
         equipment_type = "chiller"
-        chiller_no = _extract_index(compact, r"(\d+)号冷机")
+        chiller_no = _extract_chiller_no(compact)
         if chiller_no:
             equipment_id = f"chiller_{chiller_no}"
 
@@ -100,12 +144,12 @@ def parse_tag_name(tag_name: str) -> MappingResult:
         metric_name = "runtime"
         if "冷冻泵" in compact or "冷冻水泵" in compact:
             equipment_type = "chilled_pump"
-            pump_no = _extract_index(compact, r"(\d+)号")
+            pump_no = _extract_pump_no(compact)
             if pump_no:
                 equipment_id = f"pump_{pump_no}"
         elif "冷却泵" in compact or "冷却水泵" in compact:
             equipment_type = "cooling_pump"
-            pump_no = _extract_index(compact, r"(\d+)号")
+            pump_no = _extract_pump_no(compact)
             if pump_no:
                 equipment_id = f"pump_{pump_no}"
         elif "冷却塔" in compact:
@@ -118,7 +162,7 @@ def parse_tag_name(tag_name: str) -> MappingResult:
                 sub_equipment_id = f"fan_{fan_no}"
         elif "冷机" in compact:
             equipment_type = "chiller"
-            chiller_no = _extract_index(compact, r"(\d+)号冷机")
+            chiller_no = _extract_chiller_no(compact)
             if chiller_no:
                 equipment_id = f"chiller_{chiller_no}"
         else:
@@ -238,66 +282,220 @@ def parse_filename(filename: str) -> MappingResult:
     return MappingResult(None, None, None, None, None, None, "low")
 
 
+def _normalize_device_building_id(code: str) -> str:
+    """Normalize legacy device_path building tokens to canonical IDs."""
+    token = str(code).strip()
+    if token == "1":
+        return "G11"
+    if token == "2":
+        return "G12"
+    return f"G{token}"
+
+
 def parse_device_path(
     device_path: str,
     metric_name: Optional[str],
     source_file: Optional[str] = None
 ) -> MappingResult:
-    """解析设备路径"""
+    """Parse device_path with filename-aware correction."""
     std_metric = "unknown"
     metric_text = metric_name or ""
-    if "电度" in metric_text or "电量" in metric_text:
+    if "\u7535\u5ea6" in metric_text or "\u7535\u91cf" in metric_text:
         std_metric = "energy"
-    elif "功率" in metric_text:
+    elif "\u529f\u7387" in metric_text:
         std_metric = "power"
 
-    pattern1 = re.search(r"(冷却水泵|冷冻水泵)(\d+)G(\d+)_(\d+)", device_path)
-    if pattern1:
-        pump_type = "cooling_pump" if "冷却" in pattern1.group(1) else "chilled_pump"
-        pump_num = pattern1.group(2)
-        building = f"G{pattern1.group(3)}"
-        system_num = pattern1.group(4)
-        return MappingResult(building, f"{building}-{system_num}", pump_type, f"pump_{pump_num.zfill(2)}", None, std_metric, "high")
+    filename_result = MappingResult(None, None, None, None, None, None, "low")
+    if source_file:
+        filename_result = parse_filename(source_file)
 
-    pattern2 = re.search(r"冷却塔G(\d+)_(\d+).*_(\d+)_(\d+)$", device_path)
-    if pattern2:
-        building = f"G{pattern2.group(1)}"
+    parsed_from_path: Optional[MappingResult] = None
+
+    pattern1 = re.search("(\u51b7\u5374\u6c34\u6cf5|\u51b7\u51bb\u6c34\u6cf5)(\\d+)G(\\d+)_(\\d+)", device_path)
+    if pattern1:
+        pump_type = "cooling_pump" if "\u51b7\u5374" in pattern1.group(1) else "chilled_pump"
+        pump_num = pattern1.group(2)
+        building = _normalize_device_building_id(pattern1.group(3))
+        system_num = pattern1.group(4)
+        parsed_from_path = MappingResult(
+            building,
+            f"{building}-{system_num}",
+            pump_type,
+            f"pump_{pump_num.zfill(2)}",
+            None,
+            std_metric,
+            "medium",
+        )
+
+    pattern2 = re.search("\u51b7\u5374\u5854G(\\d+)_(\\d+).*_(\\d+)_(\\d+)$", device_path)
+    if pattern2 and parsed_from_path is None:
+        building = _normalize_device_building_id(pattern2.group(1))
         system_num = pattern2.group(2)
         tower_num = pattern2.group(3)
         fan_num = pattern2.group(4)
-        return MappingResult(building, f"{building}-{system_num}", "tower_fan", f"tower_{tower_num.zfill(2)}", f"fan_{fan_num.zfill(2)}", std_metric, "high")
+        parsed_from_path = MappingResult(
+            building,
+            f"{building}-{system_num}",
+            "tower_fan",
+            f"tower_{tower_num.zfill(2)}",
+            f"fan_{fan_num.zfill(2)}",
+            std_metric,
+            "medium",
+        )
 
-    pattern3 = re.search(r"冷机(\d+)G(\d+)_(\d+)", device_path)
-    if pattern3:
+    pattern3 = re.search("\u51b7\u673a(\\d+)G(\\d+)_(\\d+)", device_path)
+    if pattern3 and parsed_from_path is None:
         chiller_num = pattern3.group(1)
-        building = f"G{pattern3.group(2)}"
+        building = _normalize_device_building_id(pattern3.group(2))
         system_num = pattern3.group(3)
-        return MappingResult(building, f"{building}-{system_num}", "chiller", f"chiller_{chiller_num.zfill(2)}", None, std_metric, "high")
+        parsed_from_path = MappingResult(
+            building,
+            f"{building}-{system_num}",
+            "chiller",
+            f"chiller_{chiller_num.zfill(2)}",
+            None,
+            std_metric,
+            "medium",
+        )
 
-    # 如果 device_path 解析失败，尝试从文件名解析
-    if source_file:
-        filename_result = parse_filename(source_file)
+    if parsed_from_path is not None:
         if filename_result.confidence == "high":
-            final_metric = filename_result.metric_name or std_metric
+            final_metric = filename_result.metric_name or parsed_from_path.metric_name or std_metric
             return MappingResult(
-                filename_result.building_id, filename_result.system_id,
-                filename_result.equipment_type, filename_result.equipment_id,
-                filename_result.sub_equipment_id, final_metric, "medium"
+                filename_result.building_id,
+                filename_result.system_id,
+                parsed_from_path.equipment_type,
+                parsed_from_path.equipment_id,
+                parsed_from_path.sub_equipment_id or filename_result.sub_equipment_id,
+                final_metric,
+                "high",
             )
+        return parsed_from_path
+
+    if filename_result.confidence == "high":
+        final_metric = filename_result.metric_name or std_metric
+        return MappingResult(
+            filename_result.building_id,
+            filename_result.system_id,
+            filename_result.equipment_type,
+            filename_result.equipment_id,
+            filename_result.sub_equipment_id,
+            final_metric,
+            "medium",
+        )
 
     return MappingResult(None, None, None, None, None, std_metric, "low")
 
 
-def build_point_mapping(conn: pymysql.Connection) -> None:
-    """构建点位映射"""
-    sql = """
-        SELECT source_type, tag_name, device_path, original_metric_name, source_file
-        FROM raw_measurement
-        GROUP BY source_type, tag_name, device_path, original_metric_name, source_file
+def _log_chiller_core_mapping_audit(conn: pymysql.Connection) -> None:
+    metrics = ("load_rate", "runtime", "power", "cooling_capacity")
+    placeholders = ", ".join(["%s"] * len(metrics))
+
+    summary_sql = f"""
+        SELECT
+            building_id,
+            system_id,
+            metric_name,
+            COUNT(*) AS null_count
+        FROM point_mapping
+        WHERE equipment_type = 'chiller'
+          AND metric_name IN ({placeholders})
+          AND (equipment_id IS NULL OR equipment_id = '')
+        GROUP BY building_id, system_id, metric_name
+        ORDER BY null_count DESC, building_id, system_id, metric_name
+        LIMIT 50
     """
-    with conn.cursor() as cursor:
-        cursor.execute(sql)
-        points = cursor.fetchall()
+    suspicious_count_sql = f"""
+        SELECT COUNT(*) AS suspicious_count
+        FROM point_mapping
+        WHERE equipment_type = 'chiller'
+          AND source_type = 'tag'
+          AND metric_name IN ({placeholders})
+          AND (equipment_id IS NULL OR equipment_id = '')
+          AND tag_name REGEXP '[0-9]+[_#]'
+    """
+    suspicious_sample_sql = f"""
+        SELECT
+            building_id,
+            system_id,
+            metric_name,
+            tag_name
+        FROM point_mapping
+        WHERE equipment_type = 'chiller'
+          AND source_type = 'tag'
+          AND metric_name IN ({placeholders})
+          AND (equipment_id IS NULL OR equipment_id = '')
+          AND tag_name REGEXP '[0-9]+[_#]'
+        ORDER BY building_id, system_id, metric_name, tag_name
+        LIMIT 20
+    """
+
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(summary_sql, list(metrics))
+            summary_rows = cursor.fetchall()
+            total_null = sum(int(row["null_count"] or 0) for row in summary_rows)
+            if total_null > 0:
+                LOGGER.warning(
+                    "Chiller core mapping audit: %s rows still have NULL equipment_id.",
+                    total_null,
+                )
+                for row in summary_rows:
+                    LOGGER.warning(
+                        "  %s | %s | %s -> %s",
+                        row.get("building_id"),
+                        row.get("system_id"),
+                        row.get("metric_name"),
+                        row.get("null_count"),
+                    )
+            else:
+                LOGGER.info(
+                    "Chiller core mapping audit: no NULL equipment_id rows for core metrics."
+                )
+
+            cursor.execute(suspicious_count_sql, list(metrics))
+            suspicious = cursor.fetchone() or {}
+            suspicious_count = int(suspicious.get("suspicious_count") or 0)
+            if suspicious_count > 0:
+                LOGGER.warning(
+                    "Chiller core mapping audit: %s parseable-looking NULL rows found.",
+                    suspicious_count,
+                )
+                cursor.execute(suspicious_sample_sql, list(metrics))
+                for row in cursor.fetchall():
+                    LOGGER.warning(
+                        "  suspicious tag -> %s | %s | %s | %s",
+                        row.get("building_id"),
+                        row.get("system_id"),
+                        row.get("metric_name"),
+                        row.get("tag_name"),
+                    )
+    except Exception:
+        LOGGER.exception("Failed to run chiller core mapping audit")
+
+
+def build_point_mapping(conn: pymysql.Connection) -> None:
+    """Build point mapping."""
+    tag_sql = """
+        SELECT
+            'tag' AS source_type,
+            tag_name,
+            NULL AS device_path,
+            original_metric_name,
+            source_file
+        FROM raw_measurement FORCE INDEX (idx_raw_tag_map)
+        WHERE source_type = 'tag' AND tag_name IS NOT NULL
+    """
+    device_sql = """
+        SELECT
+            'device' AS source_type,
+            NULL AS tag_name,
+            device_path,
+            original_metric_name,
+            source_file
+        FROM raw_measurement FORCE INDEX (idx_raw_device_map)
+        WHERE source_type = 'device' AND device_path IS NOT NULL
+    """
 
     insert_sql = """
         INSERT INTO point_mapping
@@ -308,13 +506,33 @@ def build_point_mapping(conn: pymysql.Connection) -> None:
         ON DUPLICATE KEY UPDATE
             building_id = VALUES(building_id),
             system_id = VALUES(system_id),
+            equipment_type = VALUES(equipment_type),
+            equipment_id = VALUES(equipment_id),
+            sub_equipment_id = VALUES(sub_equipment_id),
             metric_name = VALUES(metric_name),
+            metric_category = VALUES(metric_category),
+            agg_method = VALUES(agg_method),
+            unit = VALUES(unit),
             confidence = VALUES(confidence),
             updated_at = CURRENT_TIMESTAMP
     """
 
-    rows: List[Tuple[Any, ...]] = []
-    for point in points:
+    def _confidence_rank(confidence: str) -> int:
+        return {"low": 0, "medium": 1, "high": 2}.get(str(confidence).lower(), 0)
+
+    def _mapping_score(parsed: MappingResult) -> int:
+        score = _confidence_rank(parsed.confidence) * 100
+        if parsed.building_id in {"G11", "G12"}:
+            score += 20
+        if parsed.system_id and parsed.building_id and str(parsed.system_id).startswith(f"{parsed.building_id}-"):
+            score += 10
+        if parsed.equipment_id:
+            score += 5
+        return score
+
+    best_rows = {}
+
+    def _update_best_rows(point: dict) -> None:
         if point["source_type"] == "tag":
             parsed = parse_tag_name(point["tag_name"] or "")
         else:
@@ -324,11 +542,87 @@ def build_point_mapping(conn: pymysql.Connection) -> None:
                 point.get("source_file")
             )
 
-        # 跳过无法解析的点位
+        # Skip unmapped points
         if not all([parsed.building_id, parsed.system_id, parsed.equipment_type, parsed.metric_name]):
             LOGGER.warning("Skipping unmapped point: tag=%s, device=%s", point["tag_name"], point["device_path"])
-            continue
+            return
 
+        mapping_key = (
+            point["source_type"],
+            point["tag_name"],
+            point["device_path"],
+            point["original_metric_name"],
+        )
+
+        candidate = {
+            "point": point,
+            "parsed": parsed,
+            "score": _mapping_score(parsed),
+            "source_file": str(point.get("source_file") or ""),
+        }
+        chosen = best_rows.get(mapping_key)
+        if (
+            chosen is None
+            or candidate["score"] > chosen["score"]
+            or (
+                candidate["score"] == chosen["score"]
+                and candidate["source_file"] < chosen["source_file"]
+            )
+        ):
+            best_rows[mapping_key] = candidate
+
+    seen_point_keys = set()
+
+    def _consume_points(query: str, source_label: str, fetch_size: int = 50000) -> int:
+        scanned = 0
+        distinct = 0
+        with conn.cursor(pymysql.cursors.SSDictCursor) as cursor:
+            cursor.execute(query)
+            while True:
+                batch = cursor.fetchmany(fetch_size)
+                if not batch:
+                    break
+                for point in batch:
+                    scanned += 1
+                    dedup_key = (
+                        point.get("source_type"),
+                        point.get("tag_name"),
+                        point.get("device_path"),
+                        point.get("original_metric_name"),
+                        point.get("source_file"),
+                    )
+                    if dedup_key in seen_point_keys:
+                        continue
+                    seen_point_keys.add(dedup_key)
+                    distinct += 1
+                    _update_best_rows(point)
+                LOGGER.info(
+                    "Scanned %s %s rows, distinct candidates=%s",
+                    scanned,
+                    source_label,
+                    distinct,
+                )
+        LOGGER.info(
+            "Finished %s scan: scanned=%s, distinct=%s",
+            source_label,
+            scanned,
+            distinct,
+        )
+        return distinct
+
+    tag_count = _consume_points(tag_sql, "tag")
+    device_count = _consume_points(device_sql, "device")
+    LOGGER.info(
+        "Distinct mapping candidates prepared: tag=%s, device=%s, merged=%s",
+        tag_count,
+        device_count,
+        len(best_rows),
+    )
+
+    rows: List[Tuple[Any, ...]] = []
+    for chosen in best_rows.values():
+        point = chosen["point"]
+        parsed = chosen["parsed"]
         metric_category, agg_method = METRIC_META.get(parsed.metric_name or "", ("instant", "avg"))
         rows.append((
             point["source_type"],
@@ -351,3 +645,5 @@ def build_point_mapping(conn: pymysql.Connection) -> None:
         with conn.cursor() as cursor:
             cursor.executemany(insert_sql, rows)
         conn.commit()
+
+    _log_chiller_core_mapping_audit(conn)

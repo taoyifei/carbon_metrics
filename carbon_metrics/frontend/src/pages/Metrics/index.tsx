@@ -3,7 +3,7 @@ import { useSearchParams } from 'react-router-dom';
 import { Alert, Button, Card, Empty, Menu, Radio, Space } from 'antd';
 import { ReloadOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
-import { METRIC_CATEGORIES } from '../../constants/metricCategories';
+import { VISIBLE_METRIC_CATEGORIES } from '../../constants/metricCategories';
 import { getMetricFilterConfig } from '../../constants/metricFilterConfig';
 import {
   useMetricCalculate,
@@ -46,8 +46,9 @@ export default function MetricsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [timeRange, setTimeRange] = useGlobalTimeRange(30);
 
-  const initCategory = searchParams.get('category') || METRIC_CATEGORIES[0]!.key;
-  const initCat = METRIC_CATEGORIES.find((c) => c.key === initCategory) ?? METRIC_CATEGORIES[0]!;
+  const initCategory = searchParams.get('category') || VISIBLE_METRIC_CATEGORIES[0]!.key;
+  const initCat = VISIBLE_METRIC_CATEGORIES.find((c) => c.key === initCategory)
+    ?? VISIBLE_METRIC_CATEGORIES[0]!;
   const initMetric = searchParams.get('metric') || initCat.metrics[0]!;
   const initSubScopeParam = searchParams.get('sub_scope');
   const initSubScope: SubEquipmentScope = isValidSubScope(initSubScopeParam)
@@ -80,11 +81,6 @@ export default function MetricsPage() {
       { replace: true },
     );
   };
-
-  const currentCategory = useMemo(
-    () => METRIC_CATEGORIES.find((c) => c.key === selectedCategory) ?? METRIC_CATEGORIES[0]!,
-    [selectedCategory],
-  );
 
   const filterConfig = useMemo(
     () => getMetricFilterConfig(selectedMetric),
@@ -142,6 +138,29 @@ export default function MetricsPage() {
   );
   const metricCoverageQuery = useMetricCoverage(currentFilters, coverageEnabled);
 
+  const visibleCategories = useMemo(() => {
+    const coverageItems = metricCoverageQuery.data?.items ?? [];
+    if (coverageItems.length === 0) {
+      return VISIBLE_METRIC_CATEGORIES;
+    }
+
+    const statusByMetric = new Map(
+      coverageItems.map((item) => [item.metric_name, item.status]),
+    );
+    const filtered = VISIBLE_METRIC_CATEGORIES.filter((category) =>
+      category.metrics.some((metricName) => {
+        const status = statusByMetric.get(metricName);
+        return status === 'success' || status === 'partial';
+      }),
+    );
+    return filtered.length > 0 ? filtered : VISIBLE_METRIC_CATEGORIES;
+  }, [metricCoverageQuery.data]);
+
+  const currentCategory = useMemo(
+    () => visibleCategories.find((c) => c.key === selectedCategory) ?? visibleCategories[0]!,
+    [selectedCategory, visibleCategories],
+  );
+
   const splitErrorRaw = isSplitMode
     ? splitMetricQueries.find((query) => query.error)?.error
     : null;
@@ -166,9 +185,31 @@ export default function MetricsPage() {
     void singleMetricQuery.refetch();
   };
 
+  useEffect(() => {
+    if (!visibleCategories.length) return;
+
+    const selected = visibleCategories.find((category) => category.key === selectedCategory);
+    if (!selected) {
+      const nextCategory = visibleCategories[0]!;
+      setSelectedCategory(nextCategory.key);
+      setSelectedMetric(nextCategory.metrics[0]!);
+      setEquipmentType(undefined);
+      setEquipmentId(undefined);
+      setSubEquipmentScope('all');
+      return;
+    }
+
+    if (!selected.metrics.includes(selectedMetric)) {
+      setSelectedMetric(selected.metrics[0]!);
+      setEquipmentType(undefined);
+      setEquipmentId(undefined);
+      setSubEquipmentScope('all');
+    }
+  }, [selectedCategory, selectedMetric, visibleCategories]);
+
   const handleCategoryChange = (key: string) => {
     setSelectedCategory(key);
-    const cat = METRIC_CATEGORIES.find((c) => c.key === key) ?? METRIC_CATEGORIES[0]!;
+    const cat = visibleCategories.find((c) => c.key === key) ?? visibleCategories[0]!;
     setSelectedMetric(cat.metrics[0]!);
     setEquipmentType(undefined);
     setEquipmentId(undefined);
@@ -188,7 +229,7 @@ export default function MetricsPage() {
     updateSearchParams(selectedCategory, selectedMetric, timeRange, subEquipmentScope);
   }, [selectedCategory, selectedMetric, subEquipmentScope, timeRange]);
 
-  const categoryMenuItems = METRIC_CATEGORIES.map((cat) => ({
+  const categoryMenuItems = visibleCategories.map((cat) => ({
     key: cat.key,
     label: `${cat.label} (${cat.metrics.length})`,
   }));
@@ -222,7 +263,7 @@ export default function MetricsPage() {
       <Card style={{ width: 180, flexShrink: 0 }} bodyStyle={{ padding: 0 }}>
         <Menu
           mode="vertical"
-          selectedKeys={[selectedCategory]}
+          selectedKeys={[currentCategory.key]}
           items={categoryMenuItems}
           onClick={({ key }) => handleCategoryChange(key)}
           style={{ border: 'none' }}

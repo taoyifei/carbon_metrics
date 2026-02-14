@@ -146,6 +146,78 @@ def _query_energy_by_type(
         return None, sql.strip(), str(e)
 
 
+def _query_energy_by_bucket_type(
+    db,
+    ctx: MetricContext,
+    clamp_threshold: float,
+    query_cache: Optional[Dict] = None,
+) -> Tuple[Optional[List], Optional[str], Optional[str]]:
+    """Query energy by hour and equipment_type for strict intersection scope."""
+    conditions = [
+        "metric_name = 'energy'",
+        "bucket_time >= %s",
+        "bucket_time < %s",
+    ]
+    params: List[Any] = [ctx.time_start, ctx.time_end]
+
+    if ctx.building_id:
+        conditions.append("building_id = %s")
+        params.append(ctx.building_id)
+    if ctx.system_id:
+        conditions.append("system_id = %s")
+        params.append(ctx.system_id)
+    if ctx.equipment_type:
+        conditions.append("equipment_type = %s")
+        params.append(ctx.equipment_type)
+    if ctx.equipment_id:
+        conditions.append("equipment_id = %s")
+        params.append(ctx.equipment_id)
+    BaseMetric._append_sub_equipment_condition(
+        conditions,
+        params,
+        ctx.sub_equipment_id,
+    )
+
+    where_clause = " AND ".join(conditions)
+    sql = f"""
+        SELECT
+            bucket_time,
+            equipment_type,
+            SUM(CASE WHEN agg_delta < 0 THEN 0 ELSE agg_delta END) AS total_energy,
+            SUM(CASE WHEN agg_delta < 0 AND agg_delta >= -%s THEN agg_delta ELSE 0 END) AS clamped_negative_total,
+            SUM(CASE WHEN agg_delta < 0 AND agg_delta >= -%s THEN 1 ELSE 0 END) AS clamped_negative_count,
+            SUM(CASE WHEN agg_delta < -%s THEN agg_delta ELSE 0 END) AS severe_negative_total,
+            SUM(CASE WHEN agg_delta < -%s THEN 1 ELSE 0 END) AS severe_negative_count,
+            COUNT(*) AS record_count
+        FROM agg_hour
+        WHERE {where_clause}
+        GROUP BY bucket_time, equipment_type
+    """
+
+    try:
+        query_params: List[Any] = [
+            clamp_threshold,
+            clamp_threshold,
+            clamp_threshold,
+            clamp_threshold,
+            *params,
+        ]
+        cache_key = ("energy_by_bucket", sql.strip(), tuple(str(p) for p in query_params))
+        if query_cache is not None and cache_key in query_cache:
+            rows = query_cache[cache_key]
+            return rows, sql.strip(), None
+
+        with db.cursor() as cursor:
+            cursor.execute(sql, query_params)
+            rows = cursor.fetchall()
+
+        if query_cache is not None:
+            query_cache[cache_key] = rows
+        return rows, sql.strip(), None
+    except Exception as e:
+        return None, sql.strip(), str(e)
+
+
 def _aggregate_energy(
     rows,
 ) -> Tuple[
@@ -227,6 +299,138 @@ def _aggregate_energy(
         sorted(set(extra_types)),
         negative_summary,
     )
+
+
+def _format_bucket(bucket_time: Any) -> str:
+    if hasattr(bucket_time, "strftime"):
+        return bucket_time.strftime("%Y-%m-%d %H:%M:%S")
+    return str(bucket_time)
+
+
+def _build_minimum_calculable_summary(rows: List[Dict[str, Any]], ctx: MetricContext) -> Dict[str, Any]:
+    required_components = set(COMPONENT_LABELS.keys())
+    expected_hours = max(
+        1,
+        int(ceil((ctx.time_end - ctx.time_start).total_seconds() / 3600)),
+    )
+
+    per_bucket_components: Dict[Any, set] = {}
+    extra_types: set = set()
+    for row in rows:
+        eq_type = str(row.get("equipment_type") or "")
+        comp = _component_key_for_type(eq_type)
+        if not comp:
+            if eq_type:
+                extra_types.add(eq_type)
+            continue
+        bucket = row.get("bucket_time")
+        per_bucket_components.setdefault(bucket, set()).add(comp)
+
+    component_covered_hours = {k: 0 for k in COMPONENT_LABELS}
+    missing_bucket_samples: List[str] = []
+    intersection_buckets: set = set()
+
+    for bucket, comp_set in per_bucket_components.items():
+        for comp in comp_set:
+            component_covered_hours[comp] += 1
+        if required_components.issubset(comp_set):
+            intersection_buckets.add(bucket)
+        elif len(missing_bucket_samples) < 20:
+            missing_bucket_samples.append(_format_bucket(bucket))
+
+    represented_hours = len(per_bucket_components)
+    intersection_hours = len(intersection_buckets)
+    missing_hours_in_represented = represented_hours - intersection_hours
+    missing_hours_outside = max(0, expected_hours - represented_hours)
+    total_missing_hours = missing_hours_in_represented + missing_hours_outside
+
+    type_map: Dict[str, float] = {}
+    total_records = 0
+    clamped_negative_count = 0
+    clamped_negative_total = 0.0
+    severe_negative_count = 0
+    severe_negative_total = 0.0
+    severe_by_type: Dict[str, Dict[str, Any]] = {}
+
+    for row in rows:
+        bucket = row.get("bucket_time")
+        if bucket not in intersection_buckets:
+            continue
+        eq_type = str(row.get("equipment_type") or "")
+        comp = _component_key_for_type(eq_type)
+        if not comp:
+            continue
+
+        energy = float(row.get("total_energy") or 0.0)
+        type_map[eq_type] = type_map.get(eq_type, 0.0) + energy
+        total_records += int(row.get("record_count") or 0)
+
+        clamped_count = int(row.get("clamped_negative_count") or 0)
+        clamped_total = float(row.get("clamped_negative_total") or 0.0)
+        severe_count = int(row.get("severe_negative_count") or 0)
+        severe_total = float(row.get("severe_negative_total") or 0.0)
+
+        clamped_negative_count += clamped_count
+        clamped_negative_total += clamped_total
+        severe_negative_count += severe_count
+        severe_negative_total += severe_total
+
+        if severe_count > 0:
+            item = severe_by_type.setdefault(
+                eq_type,
+                {"equipment_type": eq_type, "count": 0, "total": 0.0},
+            )
+            item["count"] += severe_count
+            item["total"] += severe_total
+
+    component_totals = {k: 0.0 for k in COMPONENT_LABELS}
+    for eq_type, energy in type_map.items():
+        comp = _component_key_for_type(eq_type)
+        if comp:
+            component_totals[comp] += energy
+
+    breakdown = [
+        {
+            "equipment_type": eq_type,
+            "equipment_id": None,
+            "value": round(value, 2),
+        }
+        for eq_type, value in sorted(type_map.items())
+    ]
+    severe_by_type_rows = sorted(
+        [
+            {
+                "equipment_type": key,
+                "count": int(value["count"]),
+                "total": round(float(value["total"]), 2),
+            }
+            for key, value in severe_by_type.items()
+        ],
+        key=lambda item: abs(float(item["total"])),
+        reverse=True,
+    )[:10]
+
+    return {
+        "expected_hours": expected_hours,
+        "represented_hours": represented_hours,
+        "intersection_hours": intersection_hours,
+        "missing_hours": total_missing_hours,
+        "missing_hours_without_any_component_record": missing_hours_outside,
+        "missing_bucket_samples": missing_bucket_samples,
+        "component_covered_hours": component_covered_hours,
+        "component_totals": {k: round(v, 2) for k, v in component_totals.items()},
+        "type_map": type_map,
+        "breakdown": breakdown,
+        "total_records": total_records,
+        "extra_types": sorted(extra_types),
+        "negative_summary": {
+            "clamped_negative_count": clamped_negative_count,
+            "clamped_negative_total": round(clamped_negative_total, 2),
+            "severe_negative_count": severe_negative_count,
+            "severe_negative_total": round(severe_negative_total, 2),
+            "severe_negative_by_type": severe_by_type_rows,
+        },
+    }
 
 
 def _build_negative_delta_issues(
@@ -396,99 +600,159 @@ class TotalEnergyMetric(BaseMetric):
                     quality_issues=missing_issues,
                 )
 
-            (
-                type_map,
-                total_records,
-                breakdown,
-                component_totals,
-                component_record_counts,
-                extra_types,
-                negative_summary,
-            ) = _aggregate_energy(rows)
-
             quality_score, quality_issues = self._check_quality_from_table(
                 cursor, ctx, ["energy"])
 
-            component_issues: List[Dict[str, Any]] = []
-            formula_with_values = ""
-            total = 0.0
-
-            # If equipment_type is not explicitly filtered, use fixed formula components.
-            if not ctx.equipment_type:
-                component_values = [
-                    ("chiller", round(component_totals["chiller"], 2)),
-                    ("chilled_pump", round(component_totals["chilled_pump"], 2)),
-                    ("cooling_pump", round(component_totals["cooling_pump"], 2)),
-                    ("tower", round(component_totals["tower"], 2)),
-                ]
-                total = round(sum(v for _, v in component_values), 2)
-                values_str = " + ".join([f"{v}" for _, v in component_values])
-                formula_with_values = f"= {values_str} = {total}"
-
-                missing_components = [
-                    COMPONENT_LABELS[key]
-                    for key, cnt in component_record_counts.items()
-                    if cnt == 0
-                ]
-                if missing_components:
-                    component_issues.append({
-                        "type": "missing_component",
-                        "description": f"总电量口径缺少组件 {', '.join(missing_components)}",
-                        "count": len(missing_components),
-                        "details": {
-                            "missing_components": missing_components,
-                            "component_totals": {
-                                COMPONENT_LABELS[k]: round(v, 2)
-                                for k, v in component_totals.items()
-                            },
-                        },
-                    })
-
+            # Scoped query keeps by-type behavior.
+            if ctx.equipment_type:
                 (
-                    expected_hours,
-                    covered_hours,
-                    missing_hours,
-                    missing_bucket_samples,
-                    missing_hours_outside,
-                ) = self._query_component_bucket_coverage(cursor, ctx)
-
-                if missing_hours > 0:
-                    component_issues.append({
-                        "type": "missing_time_bucket",
-                        "description": (
-                            f"Detected {missing_hours}/{expected_hours} hours with missing component coverage."
-                        ),
-                        "count": missing_hours,
-                        "details": {
-                            "expected_hours": expected_hours,
-                            "covered_hours_by_component": {
-                                COMPONENT_LABELS[k]: covered_hours[k]
-                                for k in covered_hours
-                            },
-                            "missing_bucket_samples": missing_bucket_samples,
-                            "missing_hours_without_any_component_record": missing_hours_outside,
-                        },
-                    })
-
-                if extra_types:
-                    component_issues.append({
-                        "type": "scope_notice",
-                        "description": "存在未纳入总电量公式的设备类型",
-                        "details": {"excluded_equipment_types": extra_types},
-                    })
-            else:
+                    type_map,
+                    total_records,
+                    breakdown,
+                    _component_totals,
+                    _component_record_counts,
+                    _extra_types,
+                    negative_summary,
+                ) = _aggregate_energy(rows)
                 total = round(sum(type_map.values()), 2)
                 values_str = " + ".join([f"{b['value']}" for b in breakdown])
                 formula_with_values = f"= {values_str} = {total}"
 
+                calc_issues = _build_negative_delta_issues(
+                    negative_summary=negative_summary,
+                    clamp_threshold=clamp_threshold,
+                )
+                all_issues = quality_issues + calc_issues
+                status = "partial" if all_issues else "success"
+                return CalculationResult(
+                    metric_name=self.metric_name,
+                    value=total,
+                    unit=self.unit,
+                    status=status,
+                    formula=self.formula,
+                    formula_with_values=formula_with_values,
+                    sql_executed=sql,
+                    input_records=total_records,
+                    valid_records=total_records,
+                    data_source_field="agg_delta",
+                    data_source_condition="metric_name='energy'",
+                    quality_score=quality_score,
+                    quality_issues=all_issues,
+                    breakdown=breakdown,
+                )
+
+            bucket_rows, bucket_sql, bucket_error = _query_energy_by_bucket_type(
+                self.db,
+                ctx,
+                clamp_threshold=clamp_threshold,
+                query_cache=self._query_cache,
+            )
+            if bucket_error:
+                return CalculationResult(
+                    metric_name=self.metric_name, value=None, unit=self.unit,
+                    status="failed", formula=self.formula,
+                    quality_issues=[{"type": "error", "description": bucket_error}],
+                )
+
+            summary = _build_minimum_calculable_summary(bucket_rows or [], ctx)
+            component_totals = summary["component_totals"]
+            total = round(sum(float(v) for v in component_totals.values()), 2)
+            values_str = " + ".join([
+                str(component_totals["chiller"]),
+                str(component_totals["chilled_pump"]),
+                str(component_totals["cooling_pump"]),
+                str(component_totals["tower"]),
+            ])
+            formula_with_values = f"= {values_str} = {total}"
+
+            component_issues: List[Dict[str, Any]] = []
+            missing_components = [
+                COMPONENT_LABELS[key]
+                for key, hours in summary["component_covered_hours"].items()
+                if int(hours) == 0
+            ]
+            if missing_components:
+                component_issues.append({
+                    "type": "missing_component",
+                    "description": f"Total energy denominator is missing components: {', '.join(missing_components)}",
+                    "count": len(missing_components),
+                    "details": {
+                        "missing_components": missing_components,
+                        "component_totals": {
+                            COMPONENT_LABELS[k]: component_totals[k]
+                            for k in component_totals
+                        },
+                    },
+                })
+
+            if int(summary["missing_hours"]) > 0:
+                component_issues.append({
+                    "type": "missing_time_bucket",
+                    "description": (
+                        f"Detected {summary['missing_hours']}/{summary['expected_hours']} hours "
+                        "with incomplete component coverage."
+                    ),
+                    "count": int(summary["missing_hours"]),
+                    "details": {
+                        "expected_hours": int(summary["expected_hours"]),
+                        "represented_hours": int(summary["represented_hours"]),
+                        "intersection_hours": int(summary["intersection_hours"]),
+                        "covered_hours_by_component": {
+                            COMPONENT_LABELS[k]: int(v)
+                            for k, v in summary["component_covered_hours"].items()
+                        },
+                        "missing_bucket_samples": summary["missing_bucket_samples"],
+                        "missing_hours_without_any_component_record": int(
+                            summary["missing_hours_without_any_component_record"]
+                        ),
+                    },
+                })
+
+            if summary["extra_types"]:
+                component_issues.append({
+                    "type": "scope_notice",
+                    "description": "Found equipment types excluded from total-energy formula.",
+                    "details": {"excluded_equipment_types": summary["extra_types"]},
+                })
+
+            component_issues.append({
+                "type": "minimum_calculable_principle",
+                "description": "Result uses hourly intersection of required components only.",
+                "details": {
+                    "required_components": [COMPONENT_LABELS[k] for k in COMPONENT_LABELS],
+                    "intersection_hours": int(summary["intersection_hours"]),
+                    "expected_hours": int(summary["expected_hours"]),
+                },
+            })
+
             component_issues.extend(_build_negative_delta_issues(
-                negative_summary=negative_summary,
+                negative_summary=summary["negative_summary"],
                 clamp_threshold=clamp_threshold,
             ))
 
             all_issues = quality_issues + component_issues
-            status = "partial" if all_issues else "success"
+            if int(summary["intersection_hours"]) == 0:
+                return CalculationResult(
+                    metric_name=self.metric_name,
+                    value=None,
+                    unit=self.unit,
+                    status="no_data",
+                    formula=self.formula,
+                    formula_with_values="No hourly intersection across required components.",
+                    sql_executed=bucket_sql,
+                    input_records=int(summary["total_records"]),
+                    valid_records=0,
+                    data_source_field="agg_delta",
+                    data_source_condition=(
+                        "metric_name='energy'; strict_hourly_intersection="
+                        "{chiller,chilled_pump,cooling_pump,tower}"
+                    ),
+                    quality_score=quality_score,
+                    quality_issues=all_issues,
+                    breakdown=summary["breakdown"],
+                )
 
+            status = "partial" if all_issues else "success"
             return CalculationResult(
                 metric_name=self.metric_name,
                 value=total,
@@ -496,14 +760,17 @@ class TotalEnergyMetric(BaseMetric):
                 status=status,
                 formula=self.formula,
                 formula_with_values=formula_with_values,
-                sql_executed=sql,
-                input_records=total_records,
-                valid_records=total_records,
+                sql_executed=bucket_sql,
+                input_records=int(summary["total_records"]),
+                valid_records=int(summary["total_records"]),
                 data_source_field="agg_delta",
-                data_source_condition="metric_name='energy'",
+                data_source_condition=(
+                    "metric_name='energy'; strict_hourly_intersection="
+                    "{chiller,chilled_pump,cooling_pump,tower}"
+                ),
                 quality_score=quality_score,
                 quality_issues=all_issues,
-                breakdown=breakdown,
+                breakdown=summary["breakdown"],
             )
 
 
@@ -550,60 +817,65 @@ class _EnergyRatioBase(BaseMetric):
                     quality_issues=missing_issues,
                 )
 
-            (
-                type_map,
-                total_records,
-                breakdown,
-                component_totals,
-                component_record_counts,
-                extra_types,
-                negative_summary,
-            ) = _aggregate_energy(rows)
-
-            total = round(sum(component_totals.values()), 2) if not ctx.equipment_type else round(sum(type_map.values()), 2)
-            part = round(sum(v for k, v in type_map.items() if k in self._target_types), 2)
-
             quality_score, quality_issues = self._check_quality_from_table(
                 cursor, ctx, ["energy"])
 
-            calc_issues: List[Dict[str, Any]] = []
-            if not ctx.equipment_type:
-                missing_components = [
-                    COMPONENT_LABELS[key]
-                    for key, cnt in component_record_counts.items()
-                    if cnt == 0
-                ]
-                if missing_components:
-                    calc_issues.append({
-                        "type": "missing_component",
-                        "description": f"{self.metric_name}分母口径缺少组件: {', '.join(missing_components)}",
-                        "count": len(missing_components),
-                        "details": {"missing_components": missing_components},
-                    })
-                if extra_types:
-                    calc_issues.append({
-                        "type": "scope_notice",
-                        "description": "存在未纳入分母口径的设备类型",
-                        "details": {"excluded_equipment_types": extra_types},
-                    })
+            # Scope query keeps the old behavior.
+            if ctx.equipment_type:
+                (
+                    type_map,
+                    total_records,
+                    breakdown,
+                    component_totals,
+                    component_record_counts,
+                    extra_types,
+                    negative_summary,
+                ) = _aggregate_energy(rows)
 
-            calc_issues.extend(_build_negative_delta_issues(
-                negative_summary=negative_summary,
-                clamp_threshold=clamp_threshold,
-            ))
+                total = round(sum(component_totals.values()), 2)
+                part = round(sum(v for k, v in type_map.items() if k in self._target_types), 2)
 
-            if total == 0:
-                all_issues = quality_issues + calc_issues + [{
-                    "type": "zero_denominator",
-                    "description": "Total energy is 0, ratio cannot be calculated.",
-                }]
+                calc_issues: List[Dict[str, Any]] = []
+
+                calc_issues.extend(_build_negative_delta_issues(
+                    negative_summary=negative_summary,
+                    clamp_threshold=clamp_threshold,
+                ))
+
+                if total == 0:
+                    all_issues = quality_issues + calc_issues + [{
+                        "type": "zero_denominator",
+                        "description": "Total energy is 0, ratio cannot be calculated.",
+                    }]
+                    return CalculationResult(
+                        metric_name=self.metric_name,
+                        value=None,
+                        unit=self.unit,
+                        status="partial",
+                        formula=self.formula,
+                        formula_with_values="= 0 / 0 (total energy is 0)",
+                        sql_executed=sql,
+                        input_records=total_records,
+                        valid_records=total_records,
+                        data_source_field="agg_delta",
+                        data_source_condition="metric_name='energy'",
+                        quality_score=quality_score,
+                        quality_issues=all_issues,
+                        breakdown=breakdown,
+                    )
+
+                ratio = round(part / total * 100, 2)
+                formula_with_values = f"= {part} / {total} x 100% = {ratio}%"
+                all_issues = quality_issues + calc_issues
+                status = "partial" if all_issues else "success"
+
                 return CalculationResult(
                     metric_name=self.metric_name,
-                    value=None,
+                    value=ratio,
                     unit=self.unit,
-                    status="partial",
+                    status=status,
                     formula=self.formula,
-                    formula_with_values="= 0 / 0 (鎬荤數閲忎负0)",
+                    formula_with_values=formula_with_values,
                     sql_executed=sql,
                     input_records=total_records,
                     valid_records=total_records,
@@ -614,11 +886,134 @@ class _EnergyRatioBase(BaseMetric):
                     breakdown=breakdown,
                 )
 
+            bucket_rows, bucket_sql, bucket_error = _query_energy_by_bucket_type(
+                self.db,
+                ctx,
+                clamp_threshold=clamp_threshold,
+                query_cache=self._query_cache,
+            )
+            if bucket_error:
+                return CalculationResult(
+                    metric_name=self.metric_name, value=None, unit=self.unit,
+                    status="failed", formula=self.formula,
+                    quality_issues=[{"type": "error", "description": bucket_error}],
+                )
+
+            summary = _build_minimum_calculable_summary(bucket_rows or [], ctx)
+            total = round(sum(float(v) for v in summary["component_totals"].values()), 2)
+            part = round(
+                sum(float(v) for k, v in summary["type_map"].items() if k in self._target_types),
+                2,
+            )
+
+            calc_issues: List[Dict[str, Any]] = []
+            missing_components = [
+                COMPONENT_LABELS[key]
+                for key, hours in summary["component_covered_hours"].items()
+                if int(hours) == 0
+            ]
+            if missing_components:
+                calc_issues.append({
+                    "type": "missing_component",
+                    "description": f"{self.metric_name} denominator is missing components: {', '.join(missing_components)}",
+                    "count": len(missing_components),
+                    "details": {"missing_components": missing_components},
+                })
+
+            if int(summary["missing_hours"]) > 0:
+                calc_issues.append({
+                    "type": "missing_time_bucket",
+                    "description": (
+                        f"Detected {summary['missing_hours']}/{summary['expected_hours']} hours "
+                        "with incomplete component coverage."
+                    ),
+                    "count": int(summary["missing_hours"]),
+                    "details": {
+                        "expected_hours": int(summary["expected_hours"]),
+                        "represented_hours": int(summary["represented_hours"]),
+                        "intersection_hours": int(summary["intersection_hours"]),
+                        "covered_hours_by_component": {
+                            COMPONENT_LABELS[k]: int(v)
+                            for k, v in summary["component_covered_hours"].items()
+                        },
+                        "missing_bucket_samples": summary["missing_bucket_samples"],
+                        "missing_hours_without_any_component_record": int(
+                            summary["missing_hours_without_any_component_record"]
+                        ),
+                    },
+                })
+
+            if summary["extra_types"]:
+                calc_issues.append({
+                    "type": "scope_notice",
+                    "description": "Found equipment types excluded from denominator scope.",
+                    "details": {"excluded_equipment_types": summary["extra_types"]},
+                })
+
+            calc_issues.append({
+                "type": "minimum_calculable_principle",
+                "description": "Result uses hourly intersection of required components only.",
+                "details": {
+                    "required_components": [COMPONENT_LABELS[k] for k in COMPONENT_LABELS],
+                    "intersection_hours": int(summary["intersection_hours"]),
+                    "expected_hours": int(summary["expected_hours"]),
+                },
+            })
+            calc_issues.extend(_build_negative_delta_issues(
+                negative_summary=summary["negative_summary"],
+                clamp_threshold=clamp_threshold,
+            ))
+
+            all_issues = quality_issues + calc_issues
+            if int(summary["intersection_hours"]) == 0:
+                return CalculationResult(
+                    metric_name=self.metric_name,
+                    value=None,
+                    unit=self.unit,
+                    status="no_data",
+                    formula=self.formula,
+                    formula_with_values="No hourly intersection across required denominator components.",
+                    sql_executed=bucket_sql,
+                    input_records=int(summary["total_records"]),
+                    valid_records=0,
+                    data_source_field="agg_delta",
+                    data_source_condition=(
+                        "metric_name='energy'; ratio_denominator=strict_hourly_intersection="
+                        "{chiller,chilled_pump,cooling_pump,tower}"
+                    ),
+                    quality_score=quality_score,
+                    quality_issues=all_issues,
+                    breakdown=summary["breakdown"],
+                )
+
+            if total == 0:
+                all_issues = all_issues + [{
+                    "type": "zero_denominator",
+                    "description": "Total energy is 0 in the intersection scope, ratio cannot be calculated.",
+                }]
+                return CalculationResult(
+                    metric_name=self.metric_name,
+                    value=None,
+                    unit=self.unit,
+                    status="partial",
+                    formula=self.formula,
+                    formula_with_values="= 0 / 0 (intersection-scope total energy is 0)",
+                    sql_executed=bucket_sql,
+                    input_records=int(summary["total_records"]),
+                    valid_records=int(summary["total_records"]),
+                    data_source_field="agg_delta",
+                    data_source_condition=(
+                        "metric_name='energy'; ratio_denominator=strict_hourly_intersection="
+                        "{chiller,chilled_pump,cooling_pump,tower}"
+                    ),
+                    quality_score=quality_score,
+                    quality_issues=all_issues,
+                    breakdown=summary["breakdown"],
+                )
+
             ratio = round(part / total * 100, 2)
             formula_with_values = f"= {part} / {total} x 100% = {ratio}%"
-            all_issues = quality_issues + calc_issues
             status = "partial" if all_issues else "success"
-
             return CalculationResult(
                 metric_name=self.metric_name,
                 value=ratio,
@@ -626,14 +1021,17 @@ class _EnergyRatioBase(BaseMetric):
                 status=status,
                 formula=self.formula,
                 formula_with_values=formula_with_values,
-                sql_executed=sql,
-                input_records=total_records,
-                valid_records=total_records,
+                sql_executed=bucket_sql,
+                input_records=int(summary["total_records"]),
+                valid_records=int(summary["total_records"]),
                 data_source_field="agg_delta",
-                data_source_condition="metric_name='energy'",
+                data_source_condition=(
+                    "metric_name='energy'; ratio_denominator=strict_hourly_intersection="
+                    "{chiller,chilled_pump,cooling_pump,tower}"
+                ),
                 quality_score=quality_score,
                 quality_issues=all_issues,
-                breakdown=breakdown,
+                breakdown=summary["breakdown"],
             )
 
 

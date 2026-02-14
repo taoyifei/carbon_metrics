@@ -6,6 +6,28 @@
 - **前端**：管理界面，基于 React 18 + TypeScript + Ant Design 5，提供总览、数据质量、指标计算、设备管理四个页面。
 - **数据库**：MySQL `cooling_system_v2`，数据范围 2025-07-01 ~ 2026-01-20，116 台设备（冷机 31 + 水泵 70 + 冷却塔 15）。
 
+## Latest Update (2026-02-14)
+
+- `pipeline/pipeline/mapping.py`:
+  - Added deterministic chiller id extraction for tag variants like `1号冷机`, `冷机1`, `1#冷机`, `1_冷机电流百分比`, `1_冷机累计运行时间`.
+  - `point_mapping` upsert now updates all mutable mapping fields (`equipment_type/equipment_id/sub_equipment_id/metric_category/agg_method/unit/...`), so remap can backfill historical NULL equipment ids.
+  - Added non-blocking chiller-core mapping audit logs for NULL `equipment_id` rows in `load_rate/runtime/power/cooling_capacity`.
+- `carbon_metrics/backend/metrics/chiller.py`:
+  - COP power scope is now strict by selected `sub_equipment_id` and no longer mixes `main` with NULL scope by default.
+- `carbon_metrics/backend/metrics/energy.py`:
+  - `系统总电量` and all energy ratio metrics apply the minimum-calculable principle in unscoped mode:
+    - denominator is calculated only on hourly intersection of required components (`chiller/chilled_pump/cooling_pump/tower`),
+    - no intersection -> `no_data`,
+    - intersection scope and excluded hours are recorded in `quality_issues` and `data_source_condition`.
+
+### Recommended Recompute (No Re-Ingest)
+
+```powershell
+python -m pipeline.run_pipeline --map --canonical --agg --quality --metrics --no-progress
+```
+
+Use `--ingest` only when raw Excel sources changed.
+
 ---
 
 ## 目录

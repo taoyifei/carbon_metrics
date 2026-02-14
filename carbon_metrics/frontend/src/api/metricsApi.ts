@@ -50,3 +50,25 @@ export async function fetchEquipmentIds(
     params: equipment_type ? { equipment_type } : {},
   });
 }
+
+export type SubEquipmentScopeValue = 'main' | 'backup' | 'null';
+
+export interface SubEquipmentScopeOverview {
+  available_scopes: SubEquipmentScopeValue[];
+  counts: Record<SubEquipmentScopeValue, number>;
+}
+
+export interface SubEquipmentScopeFilters {
+  building_id?: string;
+  system_id?: string;
+  equipment_type?: string;
+  equipment_id?: string;
+}
+
+export async function fetchSubEquipmentScopes(
+  filters: SubEquipmentScopeFilters,
+): Promise<SubEquipmentScopeOverview> {
+  return apiClient.get('/equipment/sub-scopes', {
+    params: filters,
+  });
+}

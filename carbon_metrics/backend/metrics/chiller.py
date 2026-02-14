@@ -339,8 +339,9 @@ class ChillerCopMetric(BaseMetric):
         where_ret, params_ret = self._build_where(water_ctx, "chilled_return_temp")
         where_sup, params_sup = self._build_where(water_ctx, "chilled_supply_temp")
 
-        power_scope_condition = "(sub_equipment_id IS NULL OR sub_equipment_id = '' OR sub_equipment_id = 'main')"
-        power_scope_text = "sub_equipment_id IN (NULL, '', 'main')"
+        # Default to NULL scope to avoid mixing main/backup channels when caller does not specify scope.
+        power_scope_condition = "(sub_equipment_id IS NULL OR sub_equipment_id = '')"
+        power_scope_text = "sub_equipment_id IN (NULL, '')"
         if ctx.sub_equipment_id:
             scope_value = ctx.sub_equipment_id.strip().lower()
             if scope_value == "main":
@@ -352,6 +353,10 @@ class ChillerCopMetric(BaseMetric):
             elif self._is_null_sub_equipment_scope(ctx.sub_equipment_id):
                 power_scope_condition = "(sub_equipment_id IS NULL OR sub_equipment_id = '')"
                 power_scope_text = "sub_equipment_id IN (NULL, '')"
+            else:
+                safe_scope = ctx.sub_equipment_id.replace("'", "''")
+                power_scope_condition = f"sub_equipment_id = '{safe_scope}'"
+                power_scope_text = f"sub_equipment_id = '{ctx.sub_equipment_id}'"
 
         power_ctx = MetricContext(
             time_start=ctx.time_start,

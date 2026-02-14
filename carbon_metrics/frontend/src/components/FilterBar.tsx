@@ -1,6 +1,7 @@
+import { useEffect, useMemo } from 'react';
 import { Select, Space } from 'antd';
 import { EQUIPMENT_TYPE_OPTIONS } from '../constants/equipmentTypes';
-import { useEquipmentIds } from '../hooks/useMetrics';
+import { useEquipmentIds, useSubEquipmentScopes } from '../hooks/useMetrics';
 import type { QualityLevel, Granularity } from '../api/types';
 
 /** 机楼 → 系统映射（硬编码，数据量小） */
@@ -75,6 +76,17 @@ export default function FilterBar({
 }: Props) {
   const effectiveEqType = fixedEquipmentType ?? equipmentType;
   const { data: eqData } = useEquipmentIds(effectiveEqType, showEquipmentId);
+  const shouldLoadSubScopes =
+    showSubEquipmentScope && (!!buildingId || !!systemId || !!effectiveEqType || !!equipmentId);
+  const { data: subScopeData } = useSubEquipmentScopes(
+    {
+      building_id: buildingId,
+      system_id: systemId,
+      equipment_type: effectiveEqType,
+      equipment_id: equipmentId,
+    },
+    shouldLoadSubScopes,
+  );
   const equipmentIdOptions = [
     { value: '', label: '全部设备' },
     ...(eqData?.items?.map((item) => ({
@@ -89,6 +101,66 @@ export default function FilterBar({
         { value: '', label: '全部系统' },
         ...Object.values(SYSTEM_MAP).flat(),
       ];
+
+  const availableSubScopes = useMemo(() => {
+    if (!shouldLoadSubScopes) {
+      return ['main', 'backup', 'null'] as const;
+    }
+    return subScopeData?.available_scopes ?? (['main', 'backup', 'null'] as const);
+  }, [shouldLoadSubScopes, subScopeData?.available_scopes]);
+
+  const subScopeOptions = useMemo(() => {
+    const allScopeOptions: Array<{ value: 'main' | 'backup' | 'null'; label: string }> = [
+      { value: 'main', label: '主机(main)' },
+      { value: 'backup', label: '备机(backup)' },
+      { value: 'null', label: '未区分(null)' },
+    ];
+    const visibleScopeOptions = allScopeOptions.filter((item) =>
+      availableSubScopes.includes(item.value),
+    );
+
+    if (visibleScopeOptions.length <= 1) {
+      return visibleScopeOptions;
+    }
+    return [
+      { value: 'all' as const, label: '全部(主/备/null)' },
+      ...visibleScopeOptions,
+    ];
+  }, [availableSubScopes]);
+
+  const selectedSubScopeValue = useMemo(() => {
+    if (subScopeOptions.length === 0) {
+      return undefined;
+    }
+    const current = subEquipmentScope ?? 'all';
+    const allowed = new Set(subScopeOptions.map((item) => item.value));
+    if (allowed.has(current)) {
+      return current;
+    }
+    return subScopeOptions[0]!.value;
+  }, [subEquipmentScope, subScopeOptions]);
+
+  useEffect(() => {
+    if (!showSubEquipmentScope) {
+      return;
+    }
+    if (subScopeOptions.length === 0) {
+      if (subEquipmentScope && subEquipmentScope !== 'all') {
+        onSubEquipmentScopeChange?.('all');
+      }
+      return;
+    }
+    const current = subEquipmentScope ?? 'all';
+    const allowed = new Set(subScopeOptions.map((item) => item.value));
+    if (!allowed.has(current)) {
+      onSubEquipmentScopeChange?.(subScopeOptions[0]!.value);
+    }
+  }, [
+    onSubEquipmentScopeChange,
+    showSubEquipmentScope,
+    subEquipmentScope,
+    subScopeOptions,
+  ]);
 
   return (
     <Space wrap>
@@ -150,20 +222,15 @@ export default function FilterBar({
           options={equipmentIdOptions}
         />
       )}
-      {showSubEquipmentScope && (
+      {showSubEquipmentScope && subScopeOptions.length > 0 && (
         <Select
           placeholder="主备口径"
           style={{ width: 180 }}
-          value={subEquipmentScope ?? 'all'}
+          value={selectedSubScopeValue}
           onChange={(v: 'all' | 'main' | 'backup' | 'null') =>
             onSubEquipmentScopeChange?.(v)
           }
-          options={[
-            { value: 'all', label: '全部(主/备/null)' },
-            { value: 'main', label: '主机(main)' },
-            { value: 'backup', label: '备机(backup)' },
-            { value: 'null', label: '未区分(null)' },
-          ]}
+          options={subScopeOptions}
         />
       )}
       {showQualityLevel && (

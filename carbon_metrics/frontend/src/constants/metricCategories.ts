@@ -52,3 +52,10 @@ export const METRIC_CATEGORIES: MetricCategory[] = [
     metrics: ['过载风险指数'],
   },
 ];
+
+// Categories temporarily hidden from frontend navigation and dashboard cards.
+export const FRONTEND_HIDDEN_CATEGORY_KEYS = new Set<string>(['stability', 'maintenance']);
+
+export const VISIBLE_METRIC_CATEGORIES: MetricCategory[] = METRIC_CATEGORIES.filter(
+  (category) => !FRONTEND_HIDDEN_CATEGORY_KEYS.has(category.key),
+);

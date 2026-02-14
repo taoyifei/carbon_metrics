@@ -1,3 +1,14 @@
+**V2.3.1 Update (2026-02-14)**:
+- `mapping.py` now recognizes more chiller-id tag variants (`1号冷机`, `冷机1`, `1#冷机`, `1_冷机电流百分比`, `1_冷机累计运行时间`).
+- `point_mapping` upsert now updates all mutable mapping columns (including `equipment_id/equipment_type/sub_equipment_id/metric_category/agg_method/unit`), so remap can fix historical NULL equipment ids.
+- Added non-blocking audit logs for chiller core metrics with NULL `equipment_id` (`load_rate/runtime/power/cooling_capacity`).
+- Minimum-calculable principle is now enforced in energy total/ratio metrics for unscoped queries: denominator is built from hourly intersection of required components.
+
+**Remap/Recompute Command (No Re-Ingest)**:
+```bash
+python -m pipeline.run_pipeline --map --canonical --agg --quality --metrics --no-progress
+```
+
 # 数据库映射文档 V2.1
 
 本文档记录了 Excel 原始文件/目录与 **cooling_system_v2** 数据库的映射关系。
