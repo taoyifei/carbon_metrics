@@ -26,3 +26,8 @@ cooling_system_v2.sql
 data1/
 
 docs/
+
+D:\Github\carbon_metrics\.sisyphus/
+# oh-my-opencode artifacts
+.sisyphus/
+
