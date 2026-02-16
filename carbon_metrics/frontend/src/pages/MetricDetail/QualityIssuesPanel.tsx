@@ -357,6 +357,16 @@ function IssueDetailBlock({ issue }: { issue: QualityIssue }): ReactNode {
       lines.push(`已过滤负值合计: ${details.filtered_negative_total}（结果为净化口径）`);
     }
 
+    if (typeof details.intersection_hours === 'number' && typeof details.expected_hours === 'number') {
+      lines.push(`交集小时数: ${details.intersection_hours} / ${details.expected_hours}`);
+    }
+    if (typeof details.represented_hours === 'number') {
+      lines.push(`有数据的小时数: ${details.represented_hours}`);
+    }
+    if (typeof details.target_component === 'string') {
+      lines.push(`目标组件: ${details.target_component}`);
+    }
+
     if (typeof details.policy === 'string' && details.policy.trim()) {
       lines.push(`处理规则: ${details.policy}`);
     }
@@ -375,6 +385,15 @@ function IssueDetailBlock({ issue }: { issue: QualityIssue }): ReactNode {
   const missingBucketDeviceRows = details ? buildMissingBucketDeviceRows(details) : [];
   const severeNegativeTypeRows = details ? buildSevereNegativeTypeRows(details) : [];
   const sensorBiasRows = details ? buildSensorBiasRows(details) : [];
+
+  const coveredHoursMap = details && isRecord(details.covered_hours_by_component)
+    ? details.covered_hours_by_component
+    : {};
+  const coveredHoursRows: SimpleRow[] = Object.entries(coveredHoursMap)
+    .map(([component, hours]) => ({
+      key: component,
+      value: `${component}: ${hours} 小时`,
+    }));
   const hasMissingBucketRows = missingBucketRows.length > 0 || missingBucketDeviceRows.length > 0;
   const useDeviceBucketTable =
     missingBucketRows.length === 0
@@ -390,6 +409,7 @@ function IssueDetailBlock({ issue }: { issue: QualityIssue }): ReactNode {
     && !hasMissingBucketRows
     && !severeNegativeTypeRows.length
     && !sensorBiasRows.length
+    && !coveredHoursRows.length
   ) {
     return undefined;
   }
@@ -444,6 +464,20 @@ function IssueDetailBlock({ issue }: { issue: QualityIssue }): ReactNode {
             style={{ marginTop: 6 }}
             columns={[{ title: '组件', dataIndex: 'value', key: 'value' }]}
             dataSource={missingComponentRows}
+          />
+        </div>
+      )}
+
+      {coveredHoursRows.length > 0 && (
+        <div>
+          <Text strong>各组件数据覆盖</Text>
+          <Table<SimpleRow>
+            size="small"
+            pagination={false}
+            rowKey="key"
+            style={{ marginTop: 6 }}
+            columns={[{ title: '组件覆盖小时数', dataIndex: 'value', key: 'value' }]}
+            dataSource={coveredHoursRows}
           />
         </div>
       )}

@@ -899,97 +899,185 @@ class _EnergyRatioBase(BaseMetric):
                     quality_issues=[{"type": "error", "description": bucket_error}],
                 )
 
-            summary = _build_minimum_calculable_summary(bucket_rows or [], ctx)
-            total = round(sum(float(v) for v in summary["component_totals"].values()), 2)
-            part = round(
-                sum(float(v) for k, v in summary["type_map"].items() if k in self._target_types),
-                2,
+            # ----------------------------------------------------------
+            # 最小可计算原则（宽松交集）：
+            # 只要求 target 组件在该小时有数据 且 该小时总能耗 > 0
+            # ----------------------------------------------------------
+            expected_hours = max(
+                1,
+                int(ceil((ctx.time_end - ctx.time_start).total_seconds() / 3600)),
             )
+            target_types = self._target_types
 
+            # 按小时分组，记录各 equipment_type 的能耗
+            per_bucket: Dict[Any, Dict[str, float]] = {}
+            per_bucket_records: Dict[Any, int] = {}
+            neg_clamped_count = 0
+            neg_clamped_total = 0.0
+            neg_severe_count = 0
+            neg_severe_total = 0.0
+            neg_severe_by_type: Dict[str, Dict[str, Any]] = {}
+            extra_types: set = set()
+
+            for row in (bucket_rows or []):
+                eq_type = str(row.get("equipment_type") or "")
+                comp = _component_key_for_type(eq_type)
+                if not comp:
+                    if eq_type:
+                        extra_types.add(eq_type)
+                    continue
+                bucket = row.get("bucket_time")
+                energy = float(row.get("total_energy") or 0.0)
+                per_bucket.setdefault(bucket, {})[eq_type] = (
+                    per_bucket.get(bucket, {}).get(eq_type, 0.0) + energy
+                )
+                per_bucket_records[bucket] = (
+                    per_bucket_records.get(bucket, 0)
+                    + int(row.get("record_count") or 0)
+                )
+                c_count = int(row.get("clamped_negative_count") or 0)
+                c_total = float(row.get("clamped_negative_total") or 0.0)
+                s_count = int(row.get("severe_negative_count") or 0)
+                s_total = float(row.get("severe_negative_total") or 0.0)
+                neg_clamped_count += c_count
+                neg_clamped_total += c_total
+                neg_severe_count += s_count
+                neg_severe_total += s_total
+                if s_count > 0:
+                    item = neg_severe_by_type.setdefault(
+                        eq_type, {"equipment_type": eq_type, "count": 0, "total": 0.0},
+                    )
+                    item["count"] += s_count
+                    item["total"] += s_total
+
+            # 筛选交集小时：target 有数据 且 该小时总能耗 > 0
+            intersection_buckets: set = set()
+            component_covered_hours: Dict[str, int] = {k: 0 for k in COMPONENT_LABELS}
+            for bucket, type_energies in per_bucket.items():
+                for eq_type in type_energies:
+                    comp = _component_key_for_type(eq_type)
+                    if comp:
+                        component_covered_hours[comp] += 1
+                has_target = any(t in type_energies for t in target_types)
+                bucket_total = sum(type_energies.values())
+                if has_target and bucket_total > 0:
+                    intersection_buckets.add(bucket)
+
+            intersection_hours = len(intersection_buckets)
+            represented_hours = len(per_bucket)
+
+            # 在交集小时上计算 part / total
+            type_map: Dict[str, float] = {}
+            total_records = 0
+            for bucket in intersection_buckets:
+                total_records += per_bucket_records.get(bucket, 0)
+                for eq_type, energy in per_bucket[bucket].items():
+                    type_map[eq_type] = type_map.get(eq_type, 0.0) + energy
+
+            part = round(sum(v for k, v in type_map.items() if k in target_types), 2)
+            total = round(sum(type_map.values()), 2)
+
+            breakdown = [
+                {"equipment_type": eq_type, "equipment_id": None, "value": round(value, 2)}
+                for eq_type, value in sorted(type_map.items())
+            ]
+
+            # quality issues
             calc_issues: List[Dict[str, Any]] = []
             missing_components = [
                 COMPONENT_LABELS[key]
-                for key, hours in summary["component_covered_hours"].items()
-                if int(hours) == 0
+                for key, hours in component_covered_hours.items()
+                if hours == 0
             ]
             if missing_components:
                 calc_issues.append({
                     "type": "missing_component",
-                    "description": f"{self.metric_name} denominator is missing components: {', '.join(missing_components)}",
+                    "description": f"{self.metric_name} 分母口径缺少组件: {', '.join(missing_components)}",
                     "count": len(missing_components),
                     "details": {"missing_components": missing_components},
                 })
-
-            if int(summary["missing_hours"]) > 0:
+            if represented_hours > intersection_hours:
                 calc_issues.append({
                     "type": "missing_time_bucket",
                     "description": (
-                        f"Detected {summary['missing_hours']}/{summary['expected_hours']} hours "
-                        "with incomplete component coverage."
+                        f"有 {represented_hours - intersection_hours}/{represented_hours} 个小时"
+                        f"因目标组件({self._target_label})缺数据或总能耗<=0被排除。"
                     ),
-                    "count": int(summary["missing_hours"]),
                     "details": {
-                        "expected_hours": int(summary["expected_hours"]),
-                        "represented_hours": int(summary["represented_hours"]),
-                        "intersection_hours": int(summary["intersection_hours"]),
+                        "expected_hours": expected_hours,
+                        "represented_hours": represented_hours,
+                        "intersection_hours": intersection_hours,
                         "covered_hours_by_component": {
-                            COMPONENT_LABELS[k]: int(v)
-                            for k, v in summary["component_covered_hours"].items()
+                            COMPONENT_LABELS[k]: v
+                            for k, v in component_covered_hours.items()
                         },
-                        "missing_bucket_samples": summary["missing_bucket_samples"],
-                        "missing_hours_without_any_component_record": int(
-                            summary["missing_hours_without_any_component_record"]
-                        ),
                     },
                 })
-
-            if summary["extra_types"]:
+            if extra_types:
                 calc_issues.append({
                     "type": "scope_notice",
-                    "description": "Found equipment types excluded from denominator scope.",
-                    "details": {"excluded_equipment_types": summary["extra_types"]},
+                    "description": "存在未纳入分母口径的设备类型",
+                    "details": {"excluded_equipment_types": sorted(extra_types)},
                 })
-
             calc_issues.append({
                 "type": "minimum_calculable_principle",
-                "description": "Result uses hourly intersection of required components only.",
+                "description": (
+                    f"按最小可计算原则，仅使用目标组件({self._target_label})有数据"
+                    f"且总能耗>0的小时计算。交集={intersection_hours}/{expected_hours}小时。"
+                ),
                 "details": {
-                    "required_components": [COMPONENT_LABELS[k] for k in COMPONENT_LABELS],
-                    "intersection_hours": int(summary["intersection_hours"]),
-                    "expected_hours": int(summary["expected_hours"]),
+                    "target_component": self._target_label,
+                    "intersection_hours": intersection_hours,
+                    "expected_hours": expected_hours,
                 },
             })
+            neg_summary = {
+                "clamped_negative_count": neg_clamped_count,
+                "clamped_negative_total": round(neg_clamped_total, 2),
+                "severe_negative_count": neg_severe_count,
+                "severe_negative_total": round(neg_severe_total, 2),
+                "severe_negative_by_type": sorted(
+                    [
+                        {"equipment_type": k, "count": int(v["count"]), "total": round(float(v["total"]), 2)}
+                        for k, v in neg_severe_by_type.items()
+                    ],
+                    key=lambda x: abs(float(x["total"])),
+                    reverse=True,
+                )[:10],
+            }
             calc_issues.extend(_build_negative_delta_issues(
-                negative_summary=summary["negative_summary"],
+                negative_summary=neg_summary,
                 clamp_threshold=clamp_threshold,
             ))
 
             all_issues = quality_issues + calc_issues
-            if int(summary["intersection_hours"]) == 0:
+            ds_condition = (
+                f"metric_name='energy'; ratio={self._target_label}/"
+                f"all; intersection=target_present_and_total>0"
+            )
+
+            if intersection_hours == 0:
                 return CalculationResult(
                     metric_name=self.metric_name,
                     value=None,
                     unit=self.unit,
                     status="no_data",
                     formula=self.formula,
-                    formula_with_values="No hourly intersection across required denominator components.",
+                    formula_with_values=f"目标组件({self._target_label})在所选时段内无能耗数据。",
                     sql_executed=bucket_sql,
-                    input_records=int(summary["total_records"]),
+                    input_records=total_records,
                     valid_records=0,
                     data_source_field="agg_delta",
-                    data_source_condition=(
-                        "metric_name='energy'; ratio_denominator=strict_hourly_intersection="
-                        "{chiller,chilled_pump,cooling_pump,tower}"
-                    ),
+                    data_source_condition=ds_condition,
                     quality_score=quality_score,
                     quality_issues=all_issues,
-                    breakdown=summary["breakdown"],
+                    breakdown=breakdown,
                 )
 
             if total == 0:
                 all_issues = all_issues + [{
                     "type": "zero_denominator",
-                    "description": "Total energy is 0 in the intersection scope, ratio cannot be calculated.",
+                    "description": "交集时段内系统总能耗为0，无法计算占比。",
                 }]
                 return CalculationResult(
                     metric_name=self.metric_name,
@@ -997,18 +1085,15 @@ class _EnergyRatioBase(BaseMetric):
                     unit=self.unit,
                     status="partial",
                     formula=self.formula,
-                    formula_with_values="= 0 / 0 (intersection-scope total energy is 0)",
+                    formula_with_values="= 0 / 0 (交集时段总能耗为0)",
                     sql_executed=bucket_sql,
-                    input_records=int(summary["total_records"]),
-                    valid_records=int(summary["total_records"]),
+                    input_records=total_records,
+                    valid_records=total_records,
                     data_source_field="agg_delta",
-                    data_source_condition=(
-                        "metric_name='energy'; ratio_denominator=strict_hourly_intersection="
-                        "{chiller,chilled_pump,cooling_pump,tower}"
-                    ),
+                    data_source_condition=ds_condition,
                     quality_score=quality_score,
                     quality_issues=all_issues,
-                    breakdown=summary["breakdown"],
+                    breakdown=breakdown,
                 )
 
             ratio = round(part / total * 100, 2)
@@ -1022,16 +1107,13 @@ class _EnergyRatioBase(BaseMetric):
                 formula=self.formula,
                 formula_with_values=formula_with_values,
                 sql_executed=bucket_sql,
-                input_records=int(summary["total_records"]),
-                valid_records=int(summary["total_records"]),
+                input_records=total_records,
+                valid_records=total_records,
                 data_source_field="agg_delta",
-                data_source_condition=(
-                    "metric_name='energy'; ratio_denominator=strict_hourly_intersection="
-                    "{chiller,chilled_pump,cooling_pump,tower}"
-                ),
+                data_source_condition=ds_condition,
                 quality_score=quality_score,
                 quality_issues=all_issues,
-                breakdown=summary["breakdown"],
+                breakdown=breakdown,
             )
 
 

@@ -188,23 +188,22 @@ export default function MetricsPage() {
   useEffect(() => {
     if (!visibleCategories.length) return;
 
-    const selected = visibleCategories.find((category) => category.key === selectedCategory);
-    if (!selected) {
-      const nextCategory = visibleCategories[0]!;
-      setSelectedCategory(nextCategory.key);
-      setSelectedMetric(nextCategory.metrics[0]!);
-      setEquipmentType(undefined);
-      setEquipmentId(undefined);
-      setSubEquipmentScope('all');
+    // 当前分类在 VISIBLE_METRIC_CATEGORIES 中存在就保持，不因设备无数据而跳转
+    const allCategory = VISIBLE_METRIC_CATEGORIES.find((c) => c.key === selectedCategory);
+    if (allCategory) {
+      if (!allCategory.metrics.includes(selectedMetric)) {
+        setSelectedMetric(allCategory.metrics[0]!);
+      }
       return;
     }
 
-    if (!selected.metrics.includes(selectedMetric)) {
-      setSelectedMetric(selected.metrics[0]!);
-      setEquipmentType(undefined);
-      setEquipmentId(undefined);
-      setSubEquipmentScope('all');
-    }
+    // 仅当分类本身不存在时才回退到第一个
+    const nextCategory = visibleCategories[0]!;
+    setSelectedCategory(nextCategory.key);
+    setSelectedMetric(nextCategory.metrics[0]!);
+    setEquipmentType(undefined);
+    setEquipmentId(undefined);
+    setSubEquipmentScope('all');
   }, [selectedCategory, selectedMetric, visibleCategories]);
 
   const handleCategoryChange = (key: string) => {
@@ -242,6 +241,7 @@ export default function MetricsPage() {
         unit={result.unit}
         status={result.status}
         qualityScore={result.quality_score}
+        qualityIssues={result.quality_issues}
       />
       {result.status === 'no_data' && result.quality_issues.length === 0 && (
         <Alert
