@@ -41,6 +41,12 @@ COMPONENT_RULES = [
     },
 ]
 COMPONENT_LABELS = {rule["key"]: rule["label"] for rule in COMPONENT_RULES}
+STRICT_INTERSECTION_KEYS = frozenset(rule["key"] for rule in COMPONENT_RULES)
+# Dynamic detection: if AVG(ABS(agg_last)) for an equipment_type is below this
+# threshold, the raw data is incremental (正向有功电度) and we use agg_last.
+# Above this threshold, data is cumulative meter readings and agg_delta is correct.
+# Cumulative readings are typically 1000s~millions; incremental readings are 0~100.
+_INCREMENTAL_DATA_THRESHOLD = 500.0
 
 
 def _component_key_for_type(equipment_type: str) -> Optional[str]:
@@ -54,6 +60,7 @@ def _query_energy_by_type(
     db,
     ctx: MetricContext,
     clamp_threshold: float,
+    positive_clamp_threshold: float,
     query_cache: Optional[Dict] = None,
 ) -> Tuple[Optional[List], Optional[str], Optional[str]]:
     """按 equipment_type 分组查询能耗数据，返回 (rows, sql, error)。"""
@@ -84,53 +91,69 @@ def _query_energy_by_type(
 
     where_clause = " AND ".join(conditions)
     sql = f"""
+        WITH energy_type_mode AS (
+            SELECT equipment_type,
+                CASE WHEN AVG(ABS(agg_last)) < @incr_threshold THEN 1 ELSE 0 END AS use_last
+            FROM agg_hour
+            WHERE {where_clause}
+            GROUP BY equipment_type
+        ),
+        energy_raw AS (
+            SELECT
+                a.equipment_type,
+                CASE WHEN m.use_last = 1 THEN a.agg_last ELSE a.agg_delta END AS eff_delta
+            FROM (SELECT * FROM agg_hour WHERE {where_clause}) a
+            JOIN energy_type_mode m ON m.equipment_type = a.equipment_type
+        )
         SELECT
             equipment_type,
             SUM(
                 CASE
-                    WHEN agg_delta < 0 THEN 0
-                    ELSE agg_delta
+                    WHEN eff_delta < 0 THEN 0
+                    WHEN eff_delta > @pdc_threshold THEN 0
+                    ELSE eff_delta
                 END
             ) AS total_energy,
             SUM(
                 CASE
-                    WHEN agg_delta < 0 AND agg_delta >= -@ndc_threshold THEN agg_delta
+                    WHEN eff_delta < 0 AND eff_delta >= -@ndc_threshold THEN eff_delta
                     ELSE 0
                 END
             ) AS clamped_negative_total,
             SUM(
                 CASE
-                    WHEN agg_delta < 0 AND agg_delta >= -@ndc_threshold THEN 1
+                    WHEN eff_delta < 0 AND eff_delta >= -@ndc_threshold THEN 1
                     ELSE 0
                 END
             ) AS clamped_negative_count,
             SUM(
                 CASE
-                    WHEN agg_delta < -@ndc_threshold THEN agg_delta
+                    WHEN eff_delta < -@ndc_threshold THEN eff_delta
                     ELSE 0
                 END
             ) AS severe_negative_total,
             SUM(
                 CASE
-                    WHEN agg_delta < -@ndc_threshold THEN 1
+                    WHEN eff_delta < -@ndc_threshold THEN 1
                     ELSE 0
                 END
             ) AS severe_negative_count,
             COUNT(*) AS record_count
-        FROM agg_hour
-        WHERE {where_clause}
+        FROM energy_raw
         GROUP BY equipment_type
     """
 
     try:
-        query_params: List[Any] = [*params]
-        cache_key = ("energy_by_type", sql.strip(), clamp_threshold, tuple(str(p) for p in params))
+        query_params: List[Any] = [*params, *params]
+        cache_key = ("energy_by_type", sql.strip(), clamp_threshold, positive_clamp_threshold, tuple(str(p) for p in params))
         if query_cache is not None and cache_key in query_cache:
             rows = query_cache[cache_key]
             return rows, sql.strip(), None
 
         with db.cursor() as cursor:
             cursor.execute("SET @ndc_threshold = %s", [clamp_threshold])
+            cursor.execute("SET @pdc_threshold = %s", [positive_clamp_threshold])
+            cursor.execute("SET @incr_threshold = %s", [_INCREMENTAL_DATA_THRESHOLD])
             cursor.execute(sql, query_params)
             rows = cursor.fetchall()
 
@@ -145,6 +168,7 @@ def _query_energy_by_bucket_type(
     db,
     ctx: MetricContext,
     clamp_threshold: float,
+    positive_clamp_threshold: float,
     query_cache: Optional[Dict] = None,
 ) -> Tuple[Optional[List], Optional[str], Optional[str]]:
     """Query energy by hour and equipment_type for strict intersection scope."""
@@ -175,29 +199,45 @@ def _query_energy_by_bucket_type(
 
     where_clause = " AND ".join(conditions)
     sql = f"""
+        WITH energy_type_mode AS (
+            SELECT equipment_type,
+                CASE WHEN AVG(ABS(agg_last)) < @incr_threshold THEN 1 ELSE 0 END AS use_last
+            FROM agg_hour
+            WHERE {where_clause}
+            GROUP BY equipment_type
+        ),
+        energy_raw AS (
+            SELECT
+                a.bucket_time,
+                a.equipment_type,
+                CASE WHEN m.use_last = 1 THEN a.agg_last ELSE a.agg_delta END AS eff_delta
+            FROM (SELECT * FROM agg_hour WHERE {where_clause}) a
+            JOIN energy_type_mode m ON m.equipment_type = a.equipment_type
+        )
         SELECT
             bucket_time,
             equipment_type,
-            SUM(CASE WHEN agg_delta < 0 THEN 0 ELSE agg_delta END) AS total_energy,
-            SUM(CASE WHEN agg_delta < 0 AND agg_delta >= -@ndc_threshold THEN agg_delta ELSE 0 END) AS clamped_negative_total,
-            SUM(CASE WHEN agg_delta < 0 AND agg_delta >= -@ndc_threshold THEN 1 ELSE 0 END) AS clamped_negative_count,
-            SUM(CASE WHEN agg_delta < -@ndc_threshold THEN agg_delta ELSE 0 END) AS severe_negative_total,
-            SUM(CASE WHEN agg_delta < -@ndc_threshold THEN 1 ELSE 0 END) AS severe_negative_count,
+            SUM(CASE WHEN eff_delta < 0 THEN 0 WHEN eff_delta > @pdc_threshold THEN 0 ELSE eff_delta END) AS total_energy,
+            SUM(CASE WHEN eff_delta < 0 AND eff_delta >= -@ndc_threshold THEN eff_delta ELSE 0 END) AS clamped_negative_total,
+            SUM(CASE WHEN eff_delta < 0 AND eff_delta >= -@ndc_threshold THEN 1 ELSE 0 END) AS clamped_negative_count,
+            SUM(CASE WHEN eff_delta < -@ndc_threshold THEN eff_delta ELSE 0 END) AS severe_negative_total,
+            SUM(CASE WHEN eff_delta < -@ndc_threshold THEN 1 ELSE 0 END) AS severe_negative_count,
             COUNT(*) AS record_count
-        FROM agg_hour
-        WHERE {where_clause}
+        FROM energy_raw
         GROUP BY bucket_time, equipment_type
     """
 
     try:
-        query_params: List[Any] = [*params]
-        cache_key = ("energy_by_bucket", sql.strip(), clamp_threshold, tuple(str(p) for p in params))
+        query_params: List[Any] = [*params, *params]
+        cache_key = ("energy_by_bucket", sql.strip(), clamp_threshold, positive_clamp_threshold, tuple(str(p) for p in params))
         if query_cache is not None and cache_key in query_cache:
             rows = query_cache[cache_key]
             return rows, sql.strip(), None
 
         with db.cursor() as cursor:
             cursor.execute("SET @ndc_threshold = %s", [clamp_threshold])
+            cursor.execute("SET @pdc_threshold = %s", [positive_clamp_threshold])
+            cursor.execute("SET @incr_threshold = %s", [_INCREMENTAL_DATA_THRESHOLD])
             cursor.execute(sql, query_params)
             rows = cursor.fetchall()
 
@@ -566,6 +606,7 @@ class TotalEnergyMetric(BaseMetric):
             self.db,
             ctx,
             clamp_threshold=clamp_threshold,
+            positive_clamp_threshold=self._positive_delta_clamp_threshold,
             query_cache=self._query_cache,
         )
 
@@ -635,6 +676,7 @@ class TotalEnergyMetric(BaseMetric):
                 self.db,
                 ctx,
                 clamp_threshold=clamp_threshold,
+                positive_clamp_threshold=self._positive_delta_clamp_threshold,
                 query_cache=self._query_cache,
             )
             if bucket_error:
@@ -784,6 +826,7 @@ class _EnergyRatioBase(BaseMetric):
             self.db,
             ctx,
             clamp_threshold=clamp_threshold,
+            positive_clamp_threshold=self._positive_delta_clamp_threshold,
             query_cache=self._query_cache,
         )
 
@@ -818,7 +861,7 @@ class _EnergyRatioBase(BaseMetric):
                     breakdown,
                     component_totals,
                     component_record_counts,
-                    extra_types,
+                    scoped_extra_types,
                     negative_summary,
                 ) = _aggregate_energy(rows)
 
@@ -880,6 +923,7 @@ class _EnergyRatioBase(BaseMetric):
                 self.db,
                 ctx,
                 clamp_threshold=clamp_threshold,
+                positive_clamp_threshold=self._positive_delta_clamp_threshold,
                 query_cache=self._query_cache,
             )
             if bucket_error:
@@ -890,8 +934,8 @@ class _EnergyRatioBase(BaseMetric):
                 )
 
             # ----------------------------------------------------------
-            # 最小可计算原则（宽松交集）：
-            # 只要求 target 组件在该小时有数据 且 该小时总能耗 > 0
+            # 最小可计算原则（严格交集）：
+            # 要求该小时四类组件(chiller/chilled_pump/cooling_pump/tower)齐全，且总能耗 > 0
             # ----------------------------------------------------------
             expected_hours = max(
                 1,
@@ -940,17 +984,21 @@ class _EnergyRatioBase(BaseMetric):
                     item["count"] += s_count
                     item["total"] += s_total
 
-            # 筛选交集小时：target 有数据 且 该小时总能耗 > 0
+            # 筛选交集小时：四类组件齐全 且 该小时总能耗 > 0
             intersection_buckets: set = set()
             component_covered_hours: Dict[str, int] = {k: 0 for k in COMPONENT_LABELS}
             for bucket, type_energies in per_bucket.items():
+                present_component_keys: set = set()
                 for eq_type in type_energies:
                     comp = _component_key_for_type(eq_type)
                     if comp:
+                        present_component_keys.add(comp)
                         component_covered_hours[comp] += 1
-                has_target = any(t in type_energies for t in target_types)
                 bucket_total = sum(type_energies.values())
-                if has_target and bucket_total > 0:
+                if (
+                    STRICT_INTERSECTION_KEYS.issubset(present_component_keys)
+                    and bucket_total > 0
+                ):
                     intersection_buckets.add(bucket)
 
             intersection_hours = len(intersection_buckets)
@@ -991,7 +1039,7 @@ class _EnergyRatioBase(BaseMetric):
                     "type": "missing_time_bucket",
                     "description": (
                         f"有 {represented_hours - intersection_hours}/{represented_hours} 个小时"
-                        f"因目标组件({self._target_label})缺数据或总能耗<=0被排除。"
+                        "因未满足四类组件严格交集或总能耗<=0被排除。"
                     ),
                     "details": {
                         "expected_hours": expected_hours,
@@ -1012,7 +1060,7 @@ class _EnergyRatioBase(BaseMetric):
             calc_issues.append({
                 "type": "minimum_calculable_principle",
                 "description": (
-                    f"按最小可计算原则，仅使用目标组件({self._target_label})有数据"
+                    "按最小可计算原则，仅使用满足四类组件严格交集"
                     f"且总能耗>0的小时计算。交集={intersection_hours}/{expected_hours}小时。"
                 ),
                 "details": {
@@ -1043,7 +1091,7 @@ class _EnergyRatioBase(BaseMetric):
             all_issues = quality_issues + calc_issues
             ds_condition = (
                 f"metric_name='energy'; ratio={self._target_label}/"
-                f"all; intersection=target_present_and_total>0"
+                f"all; intersection=strict_all_4_components"
             )
 
             if intersection_hours == 0:

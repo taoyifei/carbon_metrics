@@ -302,7 +302,7 @@ class TowerEfficiencyMetric(BaseMetric):
 
     @property
     def formula(self) -> str:
-        return "冷却塔效率 = AVG(冷却水温差) / SUM(塔电耗)，按小时对齐"
+        return "冷却塔效率 = AVG(每小时温差/每小时塔电耗)，按小时对齐（与GT一致）"
 
     def calculate(self, ctx: MetricContext) -> CalculationResult:
         water_ctx = MetricContext(
@@ -344,22 +344,36 @@ class TowerEfficiencyMetric(BaseMetric):
                 FROM ret_hour rh
                 JOIN sup_hour sh ON sh.bucket_time = rh.bucket_time
             ),
-            tower_energy_hour AS (
-                SELECT bucket_time,
-                    SUM(CASE WHEN agg_delta < 0 THEN 0 ELSE agg_delta END) AS energy_kwh
+            tower_energy_mode AS (
+                SELECT equipment_type,
+                    CASE WHEN AVG(ABS(agg_last)) < @incr_threshold THEN 1 ELSE 0 END AS use_last
                 FROM agg_hour WHERE {where_energy}
-                GROUP BY bucket_time
+                GROUP BY equipment_type
+            ),
+            tower_energy_hour AS (
+                SELECT a.bucket_time,
+                    SUM(CASE
+                        WHEN (CASE WHEN m.use_last = 1 THEN a.agg_last ELSE a.agg_delta END) < 0 THEN 0
+                        WHEN (CASE WHEN m.use_last = 1 THEN a.agg_last ELSE a.agg_delta END) > @pdc_threshold THEN 0
+                        ELSE (CASE WHEN m.use_last = 1 THEN a.agg_last ELSE a.agg_delta END)
+                    END) AS energy_kwh
+                FROM (SELECT * FROM agg_hour WHERE {where_energy}) a
+                JOIN tower_energy_mode m ON m.equipment_type = a.equipment_type
+                GROUP BY a.bucket_time
             )
             SELECT
                 COUNT(*) AS overlapped_hours,
                 AVG(dh.delta_t) AS avg_delta_t,
-                SUM(te.energy_kwh) AS total_energy
+                AVG(te.energy_kwh) AS avg_energy,
+                AVG(CASE WHEN te.energy_kwh > 0 THEN dh.delta_t / te.energy_kwh ELSE NULL END) AS avg_efficiency
             FROM delta_hour dh
             JOIN tower_energy_hour te ON te.bucket_time = dh.bucket_time
         """
-        all_params = params_ret + params_sup + energy_params
+        all_params = params_ret + params_sup + energy_params + energy_params
         try:
             with self.db.cursor() as cursor:
+                cursor.execute("SET @pdc_threshold = %s", [self._positive_delta_clamp_threshold])
+                cursor.execute("SET @incr_threshold = %s", [500.0])
                 cursor.execute(sql, all_params)
                 row = cursor.fetchone()
                 if not row or int(row["overlapped_hours"] or 0) == 0:
@@ -374,19 +388,20 @@ class TowerEfficiencyMetric(BaseMetric):
                         quality_issues=missing_issues,
                     )
                 avg_delta = float(row["avg_delta_t"] or 0)
-                total_energy = float(row["total_energy"] or 0)
+                avg_energy = float(row["avg_energy"] or 0)
+                avg_eff = row["avg_efficiency"]
                 overlapped = int(row["overlapped_hours"] or 0)
                 expected = max(1, int(ceil(
                     (ctx.time_end - ctx.time_start).total_seconds() / 3600)))
-                if total_energy < 1e-9:
+                if avg_eff is None or avg_energy < 1e-9:
                     return CalculationResult(
                         metric_name=self.metric_name, value=None,
                         unit=self.unit, status="partial",
                         formula=self.formula,
                         quality_issues=[{"type": "zero_denominator",
-                            "description": "交集时段塔电耗总和为0"}],
+                            "description": "交集时段塔电耗为0，无法计算效率"}],
                     )
-                efficiency = round(avg_delta / total_energy, 4)
+                efficiency = round(float(avg_eff), 4)
                 calc_issues: List[dict] = [{
                     "type": "minimum_calculable_principle",
                     "description": f"基于 {overlapped}/{expected} 小时交集计算",
@@ -403,8 +418,8 @@ class TowerEfficiencyMetric(BaseMetric):
                     status=self._status_from_issues(calc_issues),
                     formula=self.formula,
                     formula_with_values=(
-                        f"= {round(avg_delta, 2)} / {round(total_energy, 2)}"
-                        f" = {efficiency}"
+                        f"= AVG(delta_t/energy) = {efficiency} "
+                        f"(avg_delta_t={round(avg_delta, 2)}, avg_energy={round(avg_energy, 2)})"
                     ),
                     sql_executed=sql.strip(),
                     input_records=overlapped,

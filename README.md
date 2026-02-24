@@ -6,6 +6,26 @@
 - **前端**：管理界面，基于 React 18 + TypeScript + Ant Design 5，提供总览、数据质量、指标计算、设备管理四个页面。
 - **数据库**：MySQL `cooling_system_v2`，数据范围 2025-07-01 ~ 2026-01-20，116 台设备（冷机 31 + 水泵 70 + 冷却塔 15）。
 
+## Latest Update (2026-02-24)
+
+- `carbon_metrics/backend/metrics/energy.py`:
+  - 能耗占比指标（冷机能耗占比/水泵能耗占比/风机能耗占比）交集策略从"宽松交集"改为"严格交集"：每个小时必须四类组件（chiller/chilled_pump/cooling_pump/tower）均有数据且总能耗>0才纳入计算，与 Ground Truth 计算逻辑对齐。
+  - 新增 `STRICT_INTERSECTION_KEYS` 常量，显式定义严格交集所需的四类组件键。
+- `carbon_metrics/backend/metrics/energy.py`, `pump.py`, `tower.py`:
+  - 增量数据源动态检测（agg_last fallback）：部分设备类型的原始能耗数据为增量格式（`正向有功电度`），pipeline 误用 `delta` 聚合导致 `agg_delta` 近零。后端通过动态阈值检测（`AVG(ABS(agg_last)) < 500`）自动判断每个 `equipment_type` 的数据格式，增量数据读 `agg_last`，累计数据读 `agg_delta`。
+  - 动态检测机制：SQL 使用 CTE `energy_type_mode` 按 `equipment_type` 分组计算 `AVG(ABS(agg_last))`，低于阈值（500.0）判定为增量数据。阈值通过 MySQL 会话变量 `@incr_threshold` 传入。
+  - `energy.py`：两个 SQL 查询函数（`_query_energy_by_type`、`_query_energy_by_bucket_type`）均使用 `energy_type_mode` + `energy_raw` 双 CTE 结构，动态选择 `agg_last` 或 `agg_delta`。常量 `_INCREMENTAL_DATA_THRESHOLD = 500.0`。
+  - `pump.py`：`_PumpEnergyDensityMetric` 使用 `energy_type_mode` CTE + `CROSS JOIN` 动态选择能耗列。
+  - `tower.py`：`TowerEfficiencyMetric` 使用 `tower_energy_mode` CTE + `JOIN` 动态选择能耗列。
+  - 此方案适用于所有建筑（G11、G11-3、G12），无需维护静态设备类型列表。
+- `carbon_metrics/backend/metrics/energy.py`, `pump.py`, `tower.py`:
+  - 新增正增量钳位（Positive Delta Clamp）：当单小时 `agg_delta` 超过阈值（默认 1000 kWh）时视为电表重置噪声，该值从 SUM 中剔除。
+  - 阈值通过环境变量 `POSITIVE_DELTA_CLAMP_THRESHOLD` 控制（默认 `1000.0`）。
+- `carbon_metrics/backend/metrics/base.py`:
+  - 新增 `_positive_delta_clamp_threshold` 属性及 `_parse_positive_delta_clamp_threshold()` 静态方法，从环境变量读取正增量钳位阈值。
+
+---
+
 ## Latest Update (2026-02-16)
 
 - `carbon_metrics/frontend/src/pages/Dashboard/MetricCategoryCards.tsx`:
@@ -218,7 +238,7 @@ src/
 ### 4.1 核心事实表
 服务当前直接查询 `agg_hour`，主要使用字段包括：
 - 维度：`bucket_time`、`building_id`、`system_id`、`equipment_type`、`equipment_id`、`sub_equipment_id`、`metric_name`
-- 聚合值：`agg_avg`、`agg_min`、`agg_max`、`agg_delta`
+- 聚合值：`agg_avg`、`agg_min`、`agg_max`、`agg_delta`、`agg_last`
 - 质量标记：`quality_flags`
 
 说明：
@@ -226,6 +246,16 @@ src/
   - `-threshold <= agg_delta < 0`：按 `0` 参与求和（视为小噪声，剔除出 SUM）。
   - `agg_delta < -threshold`：同样剔除出 SUM，并额外触发告警。
 - 处理痕迹会写入 `quality_issues`（`negative_delta_clamped` / `negative_delta_alert` / `result_beautified`），便于追溯“净化口径”影响。
+- 对能耗类指标，后端还使用正增量钳位规则（`POSITIVE_DELTA_CLAMP_THRESHOLD`，默认 `1000.0`）：
+  - `agg_delta > threshold`：视为电表重置噪声，按 `0` 参与求和。
+  - 处理痕迹同样写入 `quality_issues`。
+- 对能耗占比指标（冷机/水泵/风机能耗占比），后端使用严格交集原则：
+  - 每个小时必须四类组件（冷机/冷冻泵/冷却泵/冷塔）均有能耗数据，且该小时总能耗 > 0，才纳入占比计算。
+  - 无严格交集小时时返回 `no_data` 状态。
+- 对能耗查询，后端使用动态阈值检测自动判断每个 `equipment_type` 的数据格式：
+  - 机制：SQL CTE 按 `equipment_type` 计算 `AVG(ABS(agg_last))`，低于 500 判定为增量数据（读 `agg_last`），高于 500 判定为累计数据（读 `agg_delta`）。
+  - 原因：部分设备原始数据为增量格式（`正向有功电度`），pipeline 误用 `delta` 聚合导致 `agg_delta` 近零。
+  - 此方案无需维护静态设备类型列表，适用于所有建筑。
 
 ### 4.2 质量聚合表
 质量接口依赖：
@@ -269,6 +299,7 @@ src/
 - `SENSOR_BIAS_MIN_NEGATIVE_COUNT`：命中黑名单后触发告警的最小负值条数（默认 `20`）
 - `DB_POOL_SIZE`：数据库连接池大小（2-32，默认 `8`）
 - `CHILLER_COP_MIN_POWER_KW`：冷机COP口径中“有效功率小时”下限（默认 `20`，过滤小功率待机噪声）
+- `POSITIVE_DELTA_CLAMP_THRESHOLD`：正增量钳位阈值（浮点数，默认 `1000.0`），超过此值的单小时 `agg_delta` 视为电表重置噪声并从 SUM 中剔除
 
 说明：
 - `DB_PORT` 非法时会回退到 `3306`。
@@ -278,6 +309,7 @@ src/
 - `NEGATIVE_DELTA_CLAMP_THRESHOLD` 用于区分小负值与严重负值；两者都会从 SUM 中剔除，严重负值会额外告警。
 - `SENSOR_BIAS_POINT_BLACKLIST` 用于标记重点关注点位，命中后会输出 `sensor_bias` 质量告警。
 - `冷机COP` 分母口径使用冷机主功率（`sub_equipment_id in (NULL,'','main')`），不与 `backup` 混算。
+- `POSITIVE_DELTA_CLAMP_THRESHOLD` 用于过滤电表重置导致的异常大正增量；与 `NEGATIVE_DELTA_CLAMP_THRESHOLD` 互补，分别处理正/负方向的噪声。
 
 ---
 

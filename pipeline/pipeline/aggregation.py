@@ -8,6 +8,7 @@ import pymysql
 from .db import LOGGER
 
 
+
 def _floor_to_hour(ts: datetime) -> datetime:
     return ts.replace(minute=0, second=0, microsecond=0)
 

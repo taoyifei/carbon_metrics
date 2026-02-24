@@ -68,6 +68,8 @@ class BaseMetric(ABC):
         self._query_cache = query_cache
         self._include_dependency_diagnostics = include_dependency_diagnostics
         self._negative_delta_clamp_threshold = self._parse_negative_delta_clamp_threshold()
+        self._positive_delta_clamp_threshold = self._parse_positive_delta_clamp_threshold()
+
         self._sensor_bias_blacklist = self._parse_sensor_bias_blacklist()
         self._sensor_bias_min_negative_count = self._parse_positive_int_env(
             "SENSOR_BIAS_MIN_NEGATIVE_COUNT",
@@ -84,6 +86,19 @@ class BaseMetric(ABC):
         if value < 0:
             return 0.1
         return value
+
+    @staticmethod
+    def _parse_positive_delta_clamp_threshold() -> float:
+        raw = os.getenv("POSITIVE_DELTA_CLAMP_THRESHOLD", "1000").strip()
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return 1000.0
+        if value <= 0:
+            return 1000.0
+        return value
+
+
 
     @staticmethod
     def _parse_positive_int_env(name: str, default: int) -> int:

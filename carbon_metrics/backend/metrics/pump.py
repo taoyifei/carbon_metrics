@@ -133,17 +133,29 @@ class _PumpEnergyDensityMetric(BaseMetric):
             equipment_type=self._pump_equipment_type,
         )
         where_energy, params_energy = self._build_where(energy_ctx, "energy")
+        # Dynamic detection: if AVG(ABS(agg_last)) < threshold, data is incremental → use agg_last
         sql = f"""
-            WITH flow_hour AS (
+            WITH energy_type_mode AS (
+                SELECT
+                    CASE WHEN AVG(ABS(agg_last)) < @incr_threshold THEN 1 ELSE 0 END AS use_last
+                FROM agg_hour WHERE {where_energy}
+            ),
+            flow_hour AS (
                 SELECT bucket_time, AVG(agg_avg) AS flow_avg
                 FROM agg_hour WHERE {where_flow}
                 GROUP BY bucket_time
             ),
             energy_hour AS (
-                SELECT bucket_time,
-                    SUM(CASE WHEN agg_delta < 0 THEN 0 ELSE agg_delta END) AS energy_kwh
-                FROM agg_hour WHERE {where_energy}
-                GROUP BY bucket_time
+                SELECT a.bucket_time,
+                    SUM(CASE
+                        WHEN (CASE WHEN m.use_last = 1 THEN a.agg_last ELSE a.agg_delta END) < 0 THEN 0
+                        WHEN (CASE WHEN m.use_last = 1 THEN a.agg_last ELSE a.agg_delta END) > @pdc_threshold THEN 0
+                        ELSE (CASE WHEN m.use_last = 1 THEN a.agg_last ELSE a.agg_delta END)
+                    END) AS energy_kwh
+                FROM agg_hour a
+                CROSS JOIN energy_type_mode m
+                WHERE {where_energy}
+                GROUP BY a.bucket_time
             )
             SELECT
                 COUNT(*) AS overlapped_hours,
@@ -155,7 +167,9 @@ class _PumpEnergyDensityMetric(BaseMetric):
         """
         try:
             with self.db.cursor() as cursor:
-                cursor.execute(sql, params_flow + params_energy)
+                cursor.execute("SET @pdc_threshold = %s", [self._positive_delta_clamp_threshold])
+                cursor.execute("SET @incr_threshold = %s", [500.0])
+                cursor.execute(sql, params_energy + params_flow + params_energy)
                 row = cursor.fetchone()
                 if not row or int(row["overlapped_hours"] or 0) == 0:
                     missing_issues = self._build_missing_dependency_issues(
