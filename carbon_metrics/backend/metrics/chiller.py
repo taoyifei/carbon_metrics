@@ -664,9 +664,10 @@ class ChillerCopMetric(BaseMetric):
 
 
 class SystemCopMetric(BaseMetric):
-    """制冷系统COP: 制冷量 / 系统总电量，按小时交集。"""
+    """制冷系统COP: 制冷量 / 系统总功率，按小时交集。"""
     COMPONENT_TYPES = ["chiller", "chilled_pump", "cooling_pump",
                        "cooling_tower", "cooling_tower_closed", "tower_fan"]
+    MIN_SYSTEM_POWER_KW = 20.0
     @property
     def metric_name(self) -> str:
         return "制冷系统COP"
@@ -676,8 +677,8 @@ class SystemCopMetric(BaseMetric):
     @property
     def formula(self) -> str:
         return (
-            "制冷系统COP = 制冷量(kW) / 系统总电量(kWh)，"
-            "制冷量 = 流量×温差×4.186/3.6，按小时对齐"
+            "制冷系统COP = Σ制冷量(kW) / Σ系统总功率(kW)，"
+            "制冷量 = 流量×温差×4.186/3.6，仅计入功率>20kW且温差>0的小时"
         )
     def calculate(self, ctx: MetricContext) -> CalculationResult:
         water_ctx = MetricContext(
@@ -687,21 +688,21 @@ class SystemCopMetric(BaseMetric):
         where_flow, params_flow = self._build_where(water_ctx, "chilled_flow")
         where_ret, params_ret = self._build_where(water_ctx, "chilled_return_temp")
         where_sup, params_sup = self._build_where(water_ctx, "chilled_supply_temp")
-        energy_conditions: List[str] = [
+        power_conds: List[str] = [
             "metric_name = %s", "bucket_time >= %s", "bucket_time < %s",
         ]
-        energy_params: List[Any] = ["energy", ctx.time_start, ctx.time_end]
+        power_params: List[Any] = ["power", ctx.time_start, ctx.time_end]
         placeholders = ", ".join(["%s"] * len(self.COMPONENT_TYPES))
-        energy_conditions.append(f"equipment_type IN ({placeholders})")
-        energy_params.extend(self.COMPONENT_TYPES)
+        power_conds.append(f"equipment_type IN ({placeholders})")
+        power_params.extend(self.COMPONENT_TYPES)
         if ctx.building_id:
-            energy_conditions.append("building_id = %s")
-            energy_params.append(ctx.building_id)
+            power_conds.append("building_id = %s")
+            power_params.append(ctx.building_id)
         if ctx.system_id:
-            energy_conditions.append("system_id = %s")
-            energy_params.append(ctx.system_id)
-        where_energy = " AND ".join(energy_conditions)
-
+            power_conds.append("system_id = %s")
+            power_params.append(ctx.system_id)
+        where_power = " AND ".join(power_conds)
+        min_pw = self.MIN_SYSTEM_POWER_KW
         sql = f"""
             WITH flow_hour AS (
                 SELECT bucket_time, AVG(agg_avg) AS flow_avg
@@ -718,22 +719,29 @@ class SystemCopMetric(BaseMetric):
                 FROM agg_hour WHERE {where_sup}
                 GROUP BY bucket_time
             ),
-            energy_hour AS (
-                SELECT bucket_time,
-                    SUM(CASE WHEN agg_delta < 0 THEN 0 ELSE agg_delta END) AS energy_kwh
-                FROM agg_hour WHERE {where_energy}
+            power_hour AS (
+                SELECT bucket_time, SUM(agg_avg) AS power_sum_kw
+                FROM agg_hour WHERE {where_power}
                 GROUP BY bucket_time
             )
             SELECT
                 COUNT(*) AS overlapped_hours,
-                SUM(fh.flow_avg * (rh.ret_avg - sh.sup_avg) * %s) AS cooling_sum,
-                SUM(eh.energy_kwh) AS energy_sum
+                SUM(CASE WHEN ph.power_sum_kw > %s AND (rh.ret_avg - sh.sup_avg) > 0
+                    THEN 1 ELSE 0 END) AS active_hours,
+                SUM(CASE WHEN ph.power_sum_kw > %s AND (rh.ret_avg - sh.sup_avg) > 0
+                    THEN fh.flow_avg * (rh.ret_avg - sh.sup_avg) * %s
+                    ELSE 0 END) AS cooling_sum,
+                SUM(CASE WHEN ph.power_sum_kw > %s AND (rh.ret_avg - sh.sup_avg) > 0
+                    THEN ph.power_sum_kw ELSE 0 END) AS power_sum,
+                SUM(CASE WHEN ph.power_sum_kw <= %s THEN 1 ELSE 0 END) AS low_power_hours,
+                SUM(CASE WHEN (rh.ret_avg - sh.sup_avg) <= 0 THEN 1 ELSE 0 END) AS neg_dt_hours
             FROM flow_hour fh
             JOIN ret_hour rh ON rh.bucket_time = fh.bucket_time
             JOIN sup_hour sh ON sh.bucket_time = fh.bucket_time
-            JOIN energy_hour eh ON eh.bucket_time = fh.bucket_time
+            JOIN power_hour ph ON ph.bucket_time = fh.bucket_time
         """
-        all_params = params_flow + params_ret + params_sup + energy_params + [COP_CAPACITY_FACTOR]
+        all_params = (params_flow + params_ret + params_sup + power_params
+                      + [min_pw, min_pw, COP_CAPACITY_FACTOR, min_pw, min_pw])
         try:
             with self.db.cursor() as cursor:
                 cursor.execute(sql, all_params)
@@ -741,7 +749,8 @@ class SystemCopMetric(BaseMetric):
                 if not row or int(row["overlapped_hours"] or 0) == 0:
                     missing_issues = self._build_missing_dependency_issues(
                         cursor, ctx,
-                        ["chilled_flow", "chilled_return_temp", "chilled_supply_temp", "energy"],
+                        ["chilled_flow", "chilled_return_temp",
+                         "chilled_supply_temp", "power"],
                     )
                     return CalculationResult(
                         metric_name=self.metric_name, value=None,
@@ -750,25 +759,32 @@ class SystemCopMetric(BaseMetric):
                         quality_issues=missing_issues,
                     )
                 cooling_sum = float(row["cooling_sum"] or 0)
-                energy_sum = float(row["energy_sum"] or 0)
+                power_sum = float(row["power_sum"] or 0)
                 overlapped = int(row["overlapped_hours"] or 0)
+                active = int(row["active_hours"] or 0)
+                low_pw = int(row["low_power_hours"] or 0)
+                neg_dt = int(row["neg_dt_hours"] or 0)
                 expected = max(1, int(ceil(
                     (ctx.time_end - ctx.time_start).total_seconds() / 3600)))
                 calc_issues: List[dict] = [{
                     "type": "minimum_calculable_principle",
-                    "description": f"基于 {overlapped}/{expected} 小时交集计算",
+                    "description": f"基于 {overlapped}/{expected} 小时交集计算，有效 {active} 小时",
                     "details": {
                         "intersection_hours": overlapped,
                         "expected_hours": expected,
+                        "active_hours": active,
+                        "low_power_hours": low_pw,
+                        "non_positive_delta_t_hours": neg_dt,
+                        "min_power_threshold_kw": min_pw,
                         "components": [
                             "chilled_flow", "chilled_return_temp",
-                            "chilled_supply_temp", "energy(system)"],
+                            "chilled_supply_temp", "power(system)"],
                     },
                 }]
-                if energy_sum < 1e-9:
+                if power_sum < 1e-9:
                     calc_issues.append({
                         "type": "zero_denominator",
-                        "description": "交集时段系统总电量为0，无法计算系统COP",
+                        "description": "有效时段系统总功率为0，无法计算系统COP",
                     })
                     return CalculationResult(
                         metric_name=self.metric_name, value=None,
@@ -776,19 +792,27 @@ class SystemCopMetric(BaseMetric):
                         formula=self.formula,
                         quality_issues=calc_issues,
                     )
-                cop = round(cooling_sum / energy_sum, 2)
+                cop = round(cooling_sum / power_sum, 2)
+                if cop < 0.5 or cop > 12.0:
+                    calc_issues.append({
+                        "type": "cop_out_of_range",
+                        "description": "系统COP超出常见区间(0.5-12)，请核查",
+                        "details": {"cop": cop,
+                                    "power_sum_kw": round(power_sum, 2),
+                                    "cooling_sum_kw": round(cooling_sum, 2)},
+                    })
                 return CalculationResult(
                     metric_name=self.metric_name, value=cop,
                     unit=self.unit,
                     status=self._status_from_issues(calc_issues),
                     formula=self.formula,
                     formula_with_values=(
-                        f"= {round(cooling_sum, 2)} / {round(energy_sum, 2)}"
+                        f"= {round(cooling_sum, 2)} / {round(power_sum, 2)}"
                         f" = {cop}"
                     ),
                     sql_executed=sql.strip(),
                     input_records=overlapped,
-                    valid_records=overlapped,
+                    valid_records=active,
                     quality_issues=calc_issues,
                 )
         except Exception as e:
