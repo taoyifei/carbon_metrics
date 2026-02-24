@@ -51,9 +51,12 @@ export default function MetricsPage() {
     ?? VISIBLE_METRIC_CATEGORIES[0]!;
   const initMetric = searchParams.get('metric') || initCat.metrics[0]!;
   const initSubScopeParam = searchParams.get('sub_scope');
+  // When navigated from Dashboard (no sub_scope param), default to 'null'
+  // (unscoped single value) so the displayed value matches the Dashboard.
+  // User can switch to 'all' (split mode) manually.
   const initSubScope: SubEquipmentScope = isValidSubScope(initSubScopeParam)
     ? initSubScopeParam
-    : 'all';
+    : 'null';
 
   const [selectedCategory, setSelectedCategory] = useState(initCategory);
   const [selectedMetric, setSelectedMetric] = useState(initMetric);
@@ -114,6 +117,18 @@ export default function MetricsPage() {
     ],
   );
 
+  // Coverage uses only time + building + system to avoid hiding categories
+  // when an equipment-specific filter (e.g. chiller) is active.
+  const coverageFilters = useMemo(
+    () => ({
+      time_start: timeRange[0],
+      time_end: timeRange[1],
+      building_id: buildingId,
+      system_id: systemId,
+    }),
+    [buildingId, systemId, timeRange],
+  );
+
   const isLongRange = useMemo(
     () => dayjs(timeRange[1]).diff(dayjs(timeRange[0]), 'day', true) > 31,
     [timeRange],
@@ -121,7 +136,7 @@ export default function MetricsPage() {
 
   useEffect(() => {
     setCoverageRequested(false);
-  }, [JSON.stringify(currentFilters), isLongRange]);
+  }, [JSON.stringify(coverageFilters), isLongRange]);
 
   const coverageEnabled = !isLongRange || coverageRequested;
 
@@ -136,7 +151,7 @@ export default function MetricsPage() {
     [...SPLIT_SUB_EQUIPMENT_SCOPES],
     isSplitMode,
   );
-  const metricCoverageQuery = useMetricCoverage(currentFilters, coverageEnabled);
+  const metricCoverageQuery = useMetricCoverage(coverageFilters, coverageEnabled);
 
   const visibleCategories = useMemo(() => {
     const coverageItems = metricCoverageQuery.data?.items ?? [];
@@ -154,6 +169,12 @@ export default function MetricsPage() {
       }),
     );
     return filtered.length > 0 ? filtered : VISIBLE_METRIC_CATEGORIES;
+  }, [metricCoverageQuery.data]);
+
+  const allNoData = useMemo(() => {
+    const items = metricCoverageQuery.data?.items ?? [];
+    if (items.length === 0) return false;
+    return items.every((item) => item.status === 'no_data' || item.status === 'failed');
   }, [metricCoverageQuery.data]);
 
   const currentCategory = useMemo(
@@ -312,6 +333,16 @@ export default function MetricsPage() {
           deferredLoad={isLongRange && !coverageRequested}
           onRequestLoad={() => setCoverageRequested(true)}
         />
+
+        {allNoData && !metricCoverageQuery.isLoading && (
+          <Alert
+            type="warning"
+            showIcon
+            message="当前条件下所有指标均无可用数据"
+            description="请调整时间范围或设备筛选条件。下方分类仅供参考，点击后可查看具体缺失原因。"
+            style={{ marginBottom: 16 }}
+          />
+        )}
 
         <Card size="small" style={{ marginBottom: 16 }}>
           <Radio.Group

@@ -6,6 +6,33 @@
 - **前端**：管理界面，基于 React 18 + TypeScript + Ant Design 5，提供总览、数据质量、指标计算、设备管理四个页面。
 - **数据库**：MySQL `cooling_system_v2`，数据范围 2025-07-01 ~ 2026-01-20，116 台设备（冷机 31 + 水泵 70 + 冷却塔 15）。
 
+## Latest Update (2026-02-16)
+
+- `carbon_metrics/frontend/src/pages/Dashboard/MetricCategoryCards.tsx`:
+  - 修复总览页与指标分析页数值不一致问题：总览页原先用单次 batch 调用（无 `equipment_type` 筛选）计算所有指标，导致冷机COP 等需要特定设备类型的指标值与详情页不同。
+  - 现按 `fixedEquipmentType` 分组发起多个 batch 请求（使用 `useQueries`），每组携带正确的 `equipment_type`，与指标分析页的计算口径一致。
+- `carbon_metrics/frontend/src/pages/Metrics/index.tsx`:
+  - 从总览页点击进入指标分析页时，`sub_scope` 默认值从 `'all'`（主备分算模式）改为 `'null'`（未区分/单值模式），使初始展示值与总览页一致。用户可手动切换到分算模式。
+  - 当所有指标均无可用数据时，显示 Alert 警告 Banner 提示用户调整筛选条件。
+- `carbon_metrics/backend/metrics/chiller.py`, `flow.py`, `temperature.py`, `tower.py`:
+  - 4 个 JOIN 类指标的 `minimum_calculable_principle` 质量信息补齐 `intersection_hours` 和 `expected_hours` 字段，前端交集标签（"基于 X/Y 小时交集"）现在可以正常渲染。
+  - `expected_hours` 按 `ceil((time_end - time_start) / 3600)` 计算，与 `energy.py` 保持一致。
+- `carbon_metrics/backend/metrics/energy.py` + `stability.py`:
+  - `clamp_threshold`（负增量阈值）改用 MySQL 会话变量 `@ndc_threshold`，消除位置参数对齐风险。
+- `carbon_metrics/backend/metrics/stability.py`:
+  - 运行时长占比分母从 `period_hours × device_count`（理论值）改为 `record_count`（实际有数据的设备·小时数），符合最小可算原则。
+  - 新增 `minimum_calculable_principle` 质量信息，展示实际覆盖率与理论最大值对比。
+- `carbon_metrics/frontend/src/constants/metricFilterConfig.ts`:
+  - `冷机COP` 筛选配置新增 `fixedEquipmentType: 'chiller'`，主备口径下拉仅查询冷机设备的可用范围，避免其他设备类型干扰。
+- `carbon_metrics/frontend/src/hooks/useMetrics.ts`:
+  - 统一 split 模式（主/备/未区分并列）与单独查询的缓存 key 格式，切换口径时可命中已有缓存。
+- `carbon_metrics/backend/routers/metrics.py`:
+  - `data_version` 查询结果缓存 3 秒，减少连续请求的重复 DB 查询。
+- `carbon_metrics/backend/db.py`:
+  - 连接池默认 `pool_size` 从 4 提升至 8，新增 `DB_POOL_SIZE` 环境变量支持（范围 2-32）。
+
+---
+
 ## Latest Update (2026-02-14)
 
 - `pipeline/pipeline/mapping.py`:
@@ -240,6 +267,7 @@ src/
 - `NEGATIVE_DELTA_CLAMP_THRESHOLD`：负增量小噪声归零阈值（浮点数，默认 `0.1`）
 - `SENSOR_BIAS_POINT_BLACKLIST`：传感器偏置黑名单关键词（逗号分隔，默认 `A3_GYK1113`）
 - `SENSOR_BIAS_MIN_NEGATIVE_COUNT`：命中黑名单后触发告警的最小负值条数（默认 `20`）
+- `DB_POOL_SIZE`：数据库连接池大小（2-32，默认 `8`）
 - `CHILLER_COP_MIN_POWER_KW`：冷机COP口径中“有效功率小时”下限（默认 `20`，过滤小功率待机噪声）
 
 说明：

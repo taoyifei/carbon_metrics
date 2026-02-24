@@ -94,25 +94,25 @@ def _query_energy_by_type(
             ) AS total_energy,
             SUM(
                 CASE
-                    WHEN agg_delta < 0 AND agg_delta >= -%s THEN agg_delta
+                    WHEN agg_delta < 0 AND agg_delta >= -@ndc_threshold THEN agg_delta
                     ELSE 0
                 END
             ) AS clamped_negative_total,
             SUM(
                 CASE
-                    WHEN agg_delta < 0 AND agg_delta >= -%s THEN 1
+                    WHEN agg_delta < 0 AND agg_delta >= -@ndc_threshold THEN 1
                     ELSE 0
                 END
             ) AS clamped_negative_count,
             SUM(
                 CASE
-                    WHEN agg_delta < -%s THEN agg_delta
+                    WHEN agg_delta < -@ndc_threshold THEN agg_delta
                     ELSE 0
                 END
             ) AS severe_negative_total,
             SUM(
                 CASE
-                    WHEN agg_delta < -%s THEN 1
+                    WHEN agg_delta < -@ndc_threshold THEN 1
                     ELSE 0
                 END
             ) AS severe_negative_count,
@@ -123,19 +123,14 @@ def _query_energy_by_type(
     """
 
     try:
-        query_params: List[Any] = [
-            clamp_threshold,
-            clamp_threshold,
-            clamp_threshold,
-            clamp_threshold,
-            *params,
-        ]
-        cache_key = ("energy_by_type", sql.strip(), tuple(str(p) for p in query_params))
+        query_params: List[Any] = [*params]
+        cache_key = ("energy_by_type", sql.strip(), clamp_threshold, tuple(str(p) for p in params))
         if query_cache is not None and cache_key in query_cache:
             rows = query_cache[cache_key]
             return rows, sql.strip(), None
 
         with db.cursor() as cursor:
+            cursor.execute("SET @ndc_threshold = %s", [clamp_threshold])
             cursor.execute(sql, query_params)
             rows = cursor.fetchall()
 
@@ -184,10 +179,10 @@ def _query_energy_by_bucket_type(
             bucket_time,
             equipment_type,
             SUM(CASE WHEN agg_delta < 0 THEN 0 ELSE agg_delta END) AS total_energy,
-            SUM(CASE WHEN agg_delta < 0 AND agg_delta >= -%s THEN agg_delta ELSE 0 END) AS clamped_negative_total,
-            SUM(CASE WHEN agg_delta < 0 AND agg_delta >= -%s THEN 1 ELSE 0 END) AS clamped_negative_count,
-            SUM(CASE WHEN agg_delta < -%s THEN agg_delta ELSE 0 END) AS severe_negative_total,
-            SUM(CASE WHEN agg_delta < -%s THEN 1 ELSE 0 END) AS severe_negative_count,
+            SUM(CASE WHEN agg_delta < 0 AND agg_delta >= -@ndc_threshold THEN agg_delta ELSE 0 END) AS clamped_negative_total,
+            SUM(CASE WHEN agg_delta < 0 AND agg_delta >= -@ndc_threshold THEN 1 ELSE 0 END) AS clamped_negative_count,
+            SUM(CASE WHEN agg_delta < -@ndc_threshold THEN agg_delta ELSE 0 END) AS severe_negative_total,
+            SUM(CASE WHEN agg_delta < -@ndc_threshold THEN 1 ELSE 0 END) AS severe_negative_count,
             COUNT(*) AS record_count
         FROM agg_hour
         WHERE {where_clause}
@@ -195,19 +190,14 @@ def _query_energy_by_bucket_type(
     """
 
     try:
-        query_params: List[Any] = [
-            clamp_threshold,
-            clamp_threshold,
-            clamp_threshold,
-            clamp_threshold,
-            *params,
-        ]
-        cache_key = ("energy_by_bucket", sql.strip(), tuple(str(p) for p in query_params))
+        query_params: List[Any] = [*params]
+        cache_key = ("energy_by_bucket", sql.strip(), clamp_threshold, tuple(str(p) for p in params))
         if query_cache is not None and cache_key in query_cache:
             rows = query_cache[cache_key]
             return rows, sql.strip(), None
 
         with db.cursor() as cursor:
+            cursor.execute("SET @ndc_threshold = %s", [clamp_threshold])
             cursor.execute(sql, query_params)
             rows = cursor.fetchall()
 

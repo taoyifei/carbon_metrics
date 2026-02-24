@@ -1,5 +1,6 @@
 """冷机运行效率指标计算"""
 import os
+from math import ceil
 from typing import Any, List, Optional
 
 from .base import BaseMetric, MetricContext, CalculationResult, COOLING_CAPACITY_FACTOR
@@ -554,6 +555,19 @@ class ChillerCopMetric(BaseMetric):
                         "count": non_positive_delta_t_hours,
                     })
 
+                expected_hours = max(1, int(ceil((ctx.time_end - ctx.time_start).total_seconds() / 3600)))
+                calc_issues.append({
+                    "type": "minimum_calculable_principle",
+                    "description": f"基于 {overlapped_hours}/{expected_hours} 小时交集计算（各组件按 bucket_time 对齐）",
+                    "details": {
+                        "intersection_hours": overlapped_hours,
+                        "expected_hours": expected_hours,
+                        "overlapped_hours": overlapped_hours,
+                        "components": ["chilled_flow", "chilled_return_temp", "chilled_supply_temp", "power"],
+                        "join_key": "bucket_time",
+                    },
+                })
+
                 if abs(chiller_power_sum) < 1e-9:
                     calc_issues.append({
                         "type": "zero_denominator",
@@ -645,5 +659,141 @@ class ChillerCopMetric(BaseMetric):
                 unit=self.unit,
                 status="failed",
                 formula=self.formula,
+                quality_issues=[{"type": "error", "description": str(e)}],
+            )
+
+
+class SystemCopMetric(BaseMetric):
+    """制冷系统COP: 制冷量 / 系统总电量，按小时交集。"""
+    COMPONENT_TYPES = ["chiller", "chilled_pump", "cooling_pump",
+                       "cooling_tower", "cooling_tower_closed", "tower_fan"]
+    @property
+    def metric_name(self) -> str:
+        return "制冷系统COP"
+    @property
+    def unit(self) -> str:
+        return ""
+    @property
+    def formula(self) -> str:
+        return (
+            "制冷系统COP = 制冷量(kW) / 系统总电量(kWh)，"
+            "制冷量 = 流量×温差×4.186/3.6，按小时对齐"
+        )
+    def calculate(self, ctx: MetricContext) -> CalculationResult:
+        water_ctx = MetricContext(
+            time_start=ctx.time_start, time_end=ctx.time_end,
+            building_id=ctx.building_id, system_id=ctx.system_id,
+        )
+        where_flow, params_flow = self._build_where(water_ctx, "chilled_flow")
+        where_ret, params_ret = self._build_where(water_ctx, "chilled_return_temp")
+        where_sup, params_sup = self._build_where(water_ctx, "chilled_supply_temp")
+        energy_conditions: List[str] = [
+            "metric_name = %s", "bucket_time >= %s", "bucket_time < %s",
+        ]
+        energy_params: List[Any] = ["energy", ctx.time_start, ctx.time_end]
+        placeholders = ", ".join(["%s"] * len(self.COMPONENT_TYPES))
+        energy_conditions.append(f"equipment_type IN ({placeholders})")
+        energy_params.extend(self.COMPONENT_TYPES)
+        if ctx.building_id:
+            energy_conditions.append("building_id = %s")
+            energy_params.append(ctx.building_id)
+        if ctx.system_id:
+            energy_conditions.append("system_id = %s")
+            energy_params.append(ctx.system_id)
+        where_energy = " AND ".join(energy_conditions)
+
+        sql = f"""
+            WITH flow_hour AS (
+                SELECT bucket_time, AVG(agg_avg) AS flow_avg
+                FROM agg_hour WHERE {where_flow}
+                GROUP BY bucket_time
+            ),
+            ret_hour AS (
+                SELECT bucket_time, AVG(agg_avg) AS ret_avg
+                FROM agg_hour WHERE {where_ret}
+                GROUP BY bucket_time
+            ),
+            sup_hour AS (
+                SELECT bucket_time, AVG(agg_avg) AS sup_avg
+                FROM agg_hour WHERE {where_sup}
+                GROUP BY bucket_time
+            ),
+            energy_hour AS (
+                SELECT bucket_time,
+                    SUM(CASE WHEN agg_delta < 0 THEN 0 ELSE agg_delta END) AS energy_kwh
+                FROM agg_hour WHERE {where_energy}
+                GROUP BY bucket_time
+            )
+            SELECT
+                COUNT(*) AS overlapped_hours,
+                SUM(fh.flow_avg * (rh.ret_avg - sh.sup_avg) * %s) AS cooling_sum,
+                SUM(eh.energy_kwh) AS energy_sum
+            FROM flow_hour fh
+            JOIN ret_hour rh ON rh.bucket_time = fh.bucket_time
+            JOIN sup_hour sh ON sh.bucket_time = fh.bucket_time
+            JOIN energy_hour eh ON eh.bucket_time = fh.bucket_time
+        """
+        all_params = params_flow + params_ret + params_sup + energy_params + [COP_CAPACITY_FACTOR]
+        try:
+            with self.db.cursor() as cursor:
+                cursor.execute(sql, all_params)
+                row = cursor.fetchone()
+                if not row or int(row["overlapped_hours"] or 0) == 0:
+                    missing_issues = self._build_missing_dependency_issues(
+                        cursor, ctx,
+                        ["chilled_flow", "chilled_return_temp", "chilled_supply_temp", "energy"],
+                    )
+                    return CalculationResult(
+                        metric_name=self.metric_name, value=None,
+                        unit=self.unit, status="no_data",
+                        formula=self.formula, quality_score=0.0,
+                        quality_issues=missing_issues,
+                    )
+                cooling_sum = float(row["cooling_sum"] or 0)
+                energy_sum = float(row["energy_sum"] or 0)
+                overlapped = int(row["overlapped_hours"] or 0)
+                expected = max(1, int(ceil(
+                    (ctx.time_end - ctx.time_start).total_seconds() / 3600)))
+                calc_issues: List[dict] = [{
+                    "type": "minimum_calculable_principle",
+                    "description": f"基于 {overlapped}/{expected} 小时交集计算",
+                    "details": {
+                        "intersection_hours": overlapped,
+                        "expected_hours": expected,
+                        "components": [
+                            "chilled_flow", "chilled_return_temp",
+                            "chilled_supply_temp", "energy(system)"],
+                    },
+                }]
+                if energy_sum < 1e-9:
+                    calc_issues.append({
+                        "type": "zero_denominator",
+                        "description": "交集时段系统总电量为0，无法计算系统COP",
+                    })
+                    return CalculationResult(
+                        metric_name=self.metric_name, value=None,
+                        unit=self.unit, status="partial",
+                        formula=self.formula,
+                        quality_issues=calc_issues,
+                    )
+                cop = round(cooling_sum / energy_sum, 2)
+                return CalculationResult(
+                    metric_name=self.metric_name, value=cop,
+                    unit=self.unit,
+                    status=self._status_from_issues(calc_issues),
+                    formula=self.formula,
+                    formula_with_values=(
+                        f"= {round(cooling_sum, 2)} / {round(energy_sum, 2)}"
+                        f" = {cop}"
+                    ),
+                    sql_executed=sql.strip(),
+                    input_records=overlapped,
+                    valid_records=overlapped,
+                    quality_issues=calc_issues,
+                )
+        except Exception as e:
+            return CalculationResult(
+                metric_name=self.metric_name, value=None, unit=self.unit,
+                status="failed", formula=self.formula,
                 quality_issues=[{"type": "error", "description": str(e)}],
             )

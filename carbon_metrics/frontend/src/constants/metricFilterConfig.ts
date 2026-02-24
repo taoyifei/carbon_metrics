@@ -39,12 +39,6 @@ function fixedType(type: string, showSubEquipmentScope = false): MetricFilterCon
   };
 }
 
-function withSubScope(base: MetricFilterConfig): MetricFilterConfig {
-  return {
-    ...base,
-    showSubEquipmentScope: true,
-  };
-}
 
 /**
  * 指标名 -> 筛选配置映射
@@ -72,16 +66,27 @@ export const METRIC_FILTER_CONFIG: Record<string, MetricFilterConfig> = {
   '冷机平均负载率': fixedType('chiller', true),
   '冷机最大负载率': fixedType('chiller', true),
   '冷机负载波动系数': fixedType('chiller', true),
-  '冷机COP': withSubScope(SYSTEM_ONLY),
+  '冷机COP': {
+    showBuildingId: true,
+    showSystemId: true,
+    showEquipmentType: false,
+    showEquipmentId: false,
+    showSubEquipmentScope: true,
+    fixedEquipmentType: 'chiller',
+  },
+  '制冷系统COP': SYSTEM_ONLY,
 
   // 水泵效率
   '冷冻泵工作频率': fixedType('chilled_pump'),
   '冷却泵工作频率': fixedType('cooling_pump'),
+  '冷冻泵能耗密度': SYSTEM_ONLY,
+  '冷却泵能耗密度': SYSTEM_ONLY,
 
   // 冷却塔效率
   '冷却水温差': SYSTEM_ONLY,
   // 不再固定到 tower_fan，避免误筛掉 cooling_tower/cooling_tower_closed 的功率数据
   '冷却塔风机功率': FULL_FILTER,
+  '冷却塔效率': SYSTEM_ONLY,
 
   // 运行稳定性
   '冷机运行时长占比': fixedType('chiller', true),

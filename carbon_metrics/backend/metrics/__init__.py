@@ -21,9 +21,10 @@ from .chiller import (
     ChillerMaxLoadMetric,
     ChillerLoadCvMetric,
     ChillerCopMetric,
+    SystemCopMetric,
 )
-from .pump import ChilledPumpFrequencyMetric, CoolingPumpFrequencyMetric
-from .tower import CoolingWaterDeltaTMetric, TowerFanPowerMetric
+from .pump import ChilledPumpFrequencyMetric, CoolingPumpFrequencyMetric, ChilledPumpEnergyDensityMetric, CoolingPumpEnergyDensityMetric
+from .tower import CoolingWaterDeltaTMetric, TowerFanPowerMetric, TowerEfficiencyMetric
 from .stability import ChillerRuntimeRatioMetric, TowerFanRuntimeRatioMetric
 from .maintenance import ChillerOverloadRiskMetric
 
@@ -51,12 +52,16 @@ __all__ = [
     "ChillerMaxLoadMetric",
     "ChillerLoadCvMetric",
     "ChillerCopMetric",
+    "SystemCopMetric",
     # 水泵效率
     "ChilledPumpFrequencyMetric",
     "CoolingPumpFrequencyMetric",
+    "ChilledPumpEnergyDensityMetric",
+    "CoolingPumpEnergyDensityMetric",
     # 冷却塔效率
     "CoolingWaterDeltaTMetric",
     "TowerFanPowerMetric",
+    "TowerEfficiencyMetric",
     # 运行稳定性
     "ChillerRuntimeRatioMetric",
     "TowerFanRuntimeRatioMetric",

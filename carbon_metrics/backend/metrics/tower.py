@@ -1,4 +1,5 @@
 """冷却塔相关指标计算。"""
+from math import ceil
 from typing import Any, List, Optional
 
 from .base import BaseMetric, MetricContext, CalculationResult
@@ -73,6 +74,19 @@ class CoolingWaterDeltaTMetric(BaseMetric):
                 quality_score, quality_issues = self._check_quality_from_table(
                     cursor, ctx, ["cooling_return_temp", "cooling_supply_temp"]
                 )
+
+                expected_hours = max(1, int(ceil((ctx.time_end - ctx.time_start).total_seconds() / 3600)))
+                quality_issues = quality_issues + [{
+                    "type": "minimum_calculable_principle",
+                    "description": f"基于 {overlapped_hours}/{expected_hours} 小时交集计算（各组件按 bucket_time 对齐）",
+                    "details": {
+                        "intersection_hours": overlapped_hours,
+                        "expected_hours": expected_hours,
+                        "overlapped_hours": overlapped_hours,
+                        "components": ["cooling_return_temp", "cooling_supply_temp"],
+                        "join_key": "bucket_time",
+                    },
+                }]
 
                 return CalculationResult(
                     metric_name=self.metric_name,
@@ -269,5 +283,137 @@ class TowerFanPowerMetric(BaseMetric):
                 unit=self.unit,
                 status="failed",
                 formula=self.formula,
+                quality_issues=[{"type": "error", "description": str(e)}],
+            )
+
+
+class TowerEfficiencyMetric(BaseMetric):
+    """冷却塔效率: cooling_delta_T / tower_energy，按小时交集。"""
+
+    TOWER_TYPES = ["cooling_tower", "cooling_tower_closed", "tower_fan"]
+
+    @property
+    def metric_name(self) -> str:
+        return "冷却塔效率"
+
+    @property
+    def unit(self) -> str:
+        return "℃/kWh"
+
+    @property
+    def formula(self) -> str:
+        return "冷却塔效率 = AVG(冷却水温差) / SUM(塔电耗)，按小时对齐"
+
+    def calculate(self, ctx: MetricContext) -> CalculationResult:
+        water_ctx = MetricContext(
+            time_start=ctx.time_start, time_end=ctx.time_end,
+            building_id=ctx.building_id, system_id=ctx.system_id,
+        )
+        where_ret, params_ret = self._build_where(water_ctx, "cooling_return_temp")
+        where_sup, params_sup = self._build_where(water_ctx, "cooling_supply_temp")
+
+        # Build tower energy WHERE with IN clause for tower types
+        energy_conditions = [
+            "metric_name = %s", "bucket_time >= %s", "bucket_time < %s",
+        ]
+        energy_params: List[Any] = ["energy", ctx.time_start, ctx.time_end]
+        placeholders = ", ".join(["%s"] * len(self.TOWER_TYPES))
+        energy_conditions.append(f"equipment_type IN ({placeholders})")
+        energy_params.extend(self.TOWER_TYPES)
+        if ctx.building_id:
+            energy_conditions.append("building_id = %s")
+            energy_params.append(ctx.building_id)
+        if ctx.system_id:
+            energy_conditions.append("system_id = %s")
+            energy_params.append(ctx.system_id)
+        where_energy = " AND ".join(energy_conditions)
+
+        sql = f"""
+            WITH ret_hour AS (
+                SELECT bucket_time, AVG(agg_avg) AS ret_avg
+                FROM agg_hour WHERE {where_ret}
+                GROUP BY bucket_time
+            ),
+            sup_hour AS (
+                SELECT bucket_time, AVG(agg_avg) AS sup_avg
+                FROM agg_hour WHERE {where_sup}
+                GROUP BY bucket_time
+            ),
+            delta_hour AS (
+                SELECT rh.bucket_time, (rh.ret_avg - sh.sup_avg) AS delta_t
+                FROM ret_hour rh
+                JOIN sup_hour sh ON sh.bucket_time = rh.bucket_time
+            ),
+            tower_energy_hour AS (
+                SELECT bucket_time,
+                    SUM(CASE WHEN agg_delta < 0 THEN 0 ELSE agg_delta END) AS energy_kwh
+                FROM agg_hour WHERE {where_energy}
+                GROUP BY bucket_time
+            )
+            SELECT
+                COUNT(*) AS overlapped_hours,
+                AVG(dh.delta_t) AS avg_delta_t,
+                SUM(te.energy_kwh) AS total_energy
+            FROM delta_hour dh
+            JOIN tower_energy_hour te ON te.bucket_time = dh.bucket_time
+        """
+        all_params = params_ret + params_sup + energy_params
+        try:
+            with self.db.cursor() as cursor:
+                cursor.execute(sql, all_params)
+                row = cursor.fetchone()
+                if not row or int(row["overlapped_hours"] or 0) == 0:
+                    missing_issues = self._build_missing_dependency_issues(
+                        cursor, ctx,
+                        ["cooling_return_temp", "cooling_supply_temp", "energy"],
+                    )
+                    return CalculationResult(
+                        metric_name=self.metric_name, value=None,
+                        unit=self.unit, status="no_data",
+                        formula=self.formula, quality_score=0.0,
+                        quality_issues=missing_issues,
+                    )
+                avg_delta = float(row["avg_delta_t"] or 0)
+                total_energy = float(row["total_energy"] or 0)
+                overlapped = int(row["overlapped_hours"] or 0)
+                expected = max(1, int(ceil(
+                    (ctx.time_end - ctx.time_start).total_seconds() / 3600)))
+                if total_energy < 1e-9:
+                    return CalculationResult(
+                        metric_name=self.metric_name, value=None,
+                        unit=self.unit, status="partial",
+                        formula=self.formula,
+                        quality_issues=[{"type": "zero_denominator",
+                            "description": "交集时段塔电耗总和为0"}],
+                    )
+                efficiency = round(avg_delta / total_energy, 4)
+                calc_issues: List[dict] = [{
+                    "type": "minimum_calculable_principle",
+                    "description": f"基于 {overlapped}/{expected} 小时交集计算",
+                    "details": {
+                        "intersection_hours": overlapped,
+                        "expected_hours": expected,
+                        "components": [
+                            "cooling_return_temp", "cooling_supply_temp", "energy(tower)"],
+                    },
+                }]
+                return CalculationResult(
+                    metric_name=self.metric_name, value=efficiency,
+                    unit=self.unit,
+                    status=self._status_from_issues(calc_issues),
+                    formula=self.formula,
+                    formula_with_values=(
+                        f"= {round(avg_delta, 2)} / {round(total_energy, 2)}"
+                        f" = {efficiency}"
+                    ),
+                    sql_executed=sql.strip(),
+                    input_records=overlapped,
+                    valid_records=overlapped,
+                    quality_issues=calc_issues,
+                )
+        except Exception as e:
+            return CalculationResult(
+                metric_name=self.metric_name, value=None, unit=self.unit,
+                status="failed", formula=self.formula,
                 quality_issues=[{"type": "error", "description": str(e)}],
             )

@@ -38,6 +38,10 @@ _CACHE_LOCK = threading.Lock()
 _METRIC_API_CACHE: dict[Tuple[Any, ...], _MetricCacheEntry] = {}
 _MAX_CACHE_SIZE = 512
 
+_DATA_VERSION_CACHE_LOCK = threading.Lock()
+_data_version_cache: Optional[tuple] = None  # (expire_at, version_tuple)
+_DATA_VERSION_CACHE_TTL = 3.0  # seconds
+
 
 def _resolve_metric_cache_ttl_seconds() -> int:
     raw = os.getenv("METRIC_API_CACHE_TTL_SECONDS", "30").strip()
@@ -70,7 +74,7 @@ def _prune_metric_api_cache(now_ts: float) -> None:
         _METRIC_API_CACHE.pop(key, None)
 
 
-def _load_data_version(calculator: MetricCalculator) -> Tuple[Any, ...] | None:
+def _load_data_version_from_db(calculator: MetricCalculator) -> Tuple[Any, ...] | None:
     sql = """
         SELECT
             (SELECT COALESCE(MAX(id), 0) FROM agg_hour) AS agg_hour_max_id,
@@ -91,6 +95,20 @@ def _load_data_version(calculator: MetricCalculator) -> Tuple[Any, ...] | None:
         int(row.get("quality_max_id") or 0),
         str(row.get("quality_max_bucket") or ""),
     )
+
+
+def _load_data_version(calculator: MetricCalculator) -> Tuple[Any, ...] | None:
+    global _data_version_cache
+    now = time.time()
+    with _DATA_VERSION_CACHE_LOCK:
+        if _data_version_cache is not None and _data_version_cache[0] > now:
+            return _data_version_cache[1]
+    # cache miss — query DB
+    version = _load_data_version_from_db(calculator)
+    if version is not None:
+        with _DATA_VERSION_CACHE_LOCK:
+            _data_version_cache = (now + _DATA_VERSION_CACHE_TTL, version)
+    return version
 
 
 def _cache_get(cache_key: Tuple[Any, ...], data_version: Tuple[Any, ...] | None) -> Any | None:

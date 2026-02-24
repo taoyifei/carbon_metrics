@@ -1,4 +1,5 @@
 """流量与制冷量指标计算。"""
+from math import ceil
 from typing import List
 
 from .base import BaseMetric, MetricContext, CalculationResult, COOLING_CAPACITY_FACTOR
@@ -251,6 +252,19 @@ class CoolingCapacityMetric(BaseMetric):
                     ctx,
                     ["chilled_flow", "chilled_return_temp", "chilled_supply_temp"],
                 )
+
+                expected_hours = max(1, int(ceil((ctx.time_end - ctx.time_start).total_seconds() / 3600)))
+                quality_issues = quality_issues + [{
+                    "type": "minimum_calculable_principle",
+                    "description": f"基于 {overlapped}/{expected_hours} 小时交集计算（各组件按 bucket_time 对齐）",
+                    "details": {
+                        "intersection_hours": overlapped,
+                        "expected_hours": expected_hours,
+                        "overlapped_hours": overlapped,
+                        "components": ["chilled_flow", "chilled_return_temp", "chilled_supply_temp"],
+                        "join_key": "bucket_time",
+                    },
+                }]
 
                 return CalculationResult(
                     metric_name=self.metric_name,

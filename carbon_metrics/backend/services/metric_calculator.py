@@ -31,9 +31,10 @@ from ..metrics.chiller import (
     ChillerMaxLoadMetric,
     ChillerLoadCvMetric,
     ChillerCopMetric,
+    SystemCopMetric,
 )
-from ..metrics.pump import ChilledPumpFrequencyMetric, CoolingPumpFrequencyMetric
-from ..metrics.tower import CoolingWaterDeltaTMetric, TowerFanPowerMetric
+from ..metrics.pump import ChilledPumpFrequencyMetric, CoolingPumpFrequencyMetric, ChilledPumpEnergyDensityMetric, CoolingPumpEnergyDensityMetric
+from ..metrics.tower import CoolingWaterDeltaTMetric, TowerFanPowerMetric, TowerEfficiencyMetric
 from ..metrics.stability import ChillerRuntimeRatioMetric, TowerFanRuntimeRatioMetric
 from ..metrics.maintenance import ChillerOverloadRiskMetric
 
@@ -87,12 +88,16 @@ class MetricCalculator:
         "冷机最大负载率": ChillerMaxLoadMetric,
         "冷机负载波动系数": ChillerLoadCvMetric,
         "冷机COP": ChillerCopMetric,
+        "制冷系统COP": SystemCopMetric,
         # 水泵效率
         "冷冻泵工作频率": ChilledPumpFrequencyMetric,
         "冷却泵工作频率": CoolingPumpFrequencyMetric,
+        "冷冻泵能耗密度": ChilledPumpEnergyDensityMetric,
+        "冷却泵能耗密度": CoolingPumpEnergyDensityMetric,
         # 冷却塔效率
         "冷却水温差": CoolingWaterDeltaTMetric,
         "冷却塔风机功率": TowerFanPowerMetric,
+        "冷却塔效率": TowerEfficiencyMetric,
         # 运行稳定性
         "冷机运行时长占比": ChillerRuntimeRatioMetric,
         "风机运行时长占比": TowerFanRuntimeRatioMetric,

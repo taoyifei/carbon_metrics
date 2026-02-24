@@ -29,17 +29,17 @@ export const METRIC_CATEGORIES: MetricCategory[] = [
   {
     key: 'chiller',
     label: '冷机效率',
-    metrics: ['冷机平均负载率', '冷机最大负载率', '冷机负载波动系数', '冷机COP'],
+    metrics: ['冷机平均负载率', '冷机最大负载率', '冷机负载波动系数', '冷机COP', '制冷系统COP'],
   },
   {
     key: 'pump',
     label: '水泵效率',
-    metrics: ['冷冻泵工作频率', '冷却泵工作频率'],
+    metrics: ['冷冻泵工作频率', '冷却泵工作频率', '冷冻泵能耗密度', '冷却泵能耗密度'],
   },
   {
     key: 'tower',
     label: '冷却塔效率',
-    metrics: ['冷却水温差', '冷却塔风机功率'],
+    metrics: ['冷却水温差', '冷却塔风机功率', '冷却塔效率'],
   },
   {
     key: 'stability',

@@ -1,4 +1,5 @@
 """温度与温差指标计算"""
+from math import ceil
 from typing import Any, List
 
 from .base import BaseMetric, MetricContext, CalculationResult
@@ -212,6 +213,19 @@ class ChilledWaterDeltaTMetric(BaseMetric):
                 quality_score, quality_issues = self._check_quality_from_table(
                     cursor, ctx, ["chilled_return_temp", "chilled_supply_temp"]
                 )
+
+                expected_hours = max(1, int(ceil((ctx.time_end - ctx.time_start).total_seconds() / 3600)))
+                quality_issues = quality_issues + [{
+                    "type": "minimum_calculable_principle",
+                    "description": f"基于 {overlapped_hours}/{expected_hours} 小时交集计算（各组件按 bucket_time 对齐）",
+                    "details": {
+                        "intersection_hours": overlapped_hours,
+                        "expected_hours": expected_hours,
+                        "overlapped_hours": overlapped_hours,
+                        "components": ["chilled_return_temp", "chilled_supply_temp"],
+                        "join_key": "bucket_time",
+                    },
+                }]
 
                 return CalculationResult(
                     metric_name=self.metric_name,

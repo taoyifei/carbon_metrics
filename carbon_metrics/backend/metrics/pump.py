@@ -1,6 +1,8 @@
 """
 水泵效率指标计算
 """
+from math import ceil
+from typing import List
 from .base import BaseMetric, MetricContext, CalculationResult
 
 
@@ -102,3 +104,151 @@ class CoolingPumpFrequencyMetric(_PumpFrequencyMetric):
     @property
     def _equipment_type(self) -> str:
         return "cooling_pump"
+
+
+class _PumpEnergyDensityMetric(BaseMetric):
+    """泵能耗密度基类: pump_energy / flow，按小时交集。"""
+
+    @property
+    def unit(self) -> str:
+        return "kWh/(m³/h)"
+
+    @property
+    def _pump_equipment_type(self) -> str:
+        raise NotImplementedError
+
+    @property
+    def _flow_metric_name(self) -> str:
+        raise NotImplementedError
+
+    def calculate(self, ctx: MetricContext) -> CalculationResult:
+        water_ctx = MetricContext(
+            time_start=ctx.time_start, time_end=ctx.time_end,
+            building_id=ctx.building_id, system_id=ctx.system_id,
+        )
+        where_flow, params_flow = self._build_where(water_ctx, self._flow_metric_name)
+        energy_ctx = MetricContext(
+            time_start=ctx.time_start, time_end=ctx.time_end,
+            building_id=ctx.building_id, system_id=ctx.system_id,
+            equipment_type=self._pump_equipment_type,
+        )
+        where_energy, params_energy = self._build_where(energy_ctx, "energy")
+        sql = f"""
+            WITH flow_hour AS (
+                SELECT bucket_time, AVG(agg_avg) AS flow_avg
+                FROM agg_hour WHERE {where_flow}
+                GROUP BY bucket_time
+            ),
+            energy_hour AS (
+                SELECT bucket_time,
+                    SUM(CASE WHEN agg_delta < 0 THEN 0 ELSE agg_delta END) AS energy_kwh
+                FROM agg_hour WHERE {where_energy}
+                GROUP BY bucket_time
+            )
+            SELECT
+                COUNT(*) AS overlapped_hours,
+                SUM(eh.energy_kwh) AS total_energy,
+                SUM(fh.flow_avg) AS total_flow
+            FROM flow_hour fh
+            JOIN energy_hour eh ON eh.bucket_time = fh.bucket_time
+            WHERE fh.flow_avg > 0
+        """
+        try:
+            with self.db.cursor() as cursor:
+                cursor.execute(sql, params_flow + params_energy)
+                row = cursor.fetchone()
+                if not row or int(row["overlapped_hours"] or 0) == 0:
+                    missing_issues = self._build_missing_dependency_issues(
+                        cursor, ctx,
+                        [self._flow_metric_name, "energy"],
+                        equipment_type=self._pump_equipment_type,
+                    )
+                    return CalculationResult(
+                        metric_name=self.metric_name, value=None,
+                        unit=self.unit, status="no_data",
+                        formula=self.formula, quality_score=0.0,
+                        quality_issues=missing_issues,
+                    )
+                total_energy = float(row["total_energy"] or 0)
+                total_flow = float(row["total_flow"] or 0)
+                overlapped = int(row["overlapped_hours"] or 0)
+                expected = max(1, int(ceil(
+                    (ctx.time_end - ctx.time_start).total_seconds() / 3600)))
+                if total_flow < 1e-9:
+                    return CalculationResult(
+                        metric_name=self.metric_name, value=None,
+                        unit=self.unit, status="partial",
+                        formula=self.formula,
+                        quality_issues=[{"type": "zero_denominator",
+                            "description": "交集时段流量总和为0"}],
+                    )
+                density = round(total_energy / total_flow, 4)
+                calc_issues: List[dict] = [{
+                    "type": "minimum_calculable_principle",
+                    "description": f"基于 {overlapped}/{expected} 小时交集计算",
+                    "details": {
+                        "intersection_hours": overlapped,
+                        "expected_hours": expected,
+                        "components": ["energy", self._flow_metric_name],
+                    },
+                }]
+                return CalculationResult(
+                    metric_name=self.metric_name, value=density,
+                    unit=self.unit,
+                    status=self._status_from_issues(calc_issues),
+                    formula=self.formula,
+                    formula_with_values=(
+                        f"= {round(total_energy, 2)} / {round(total_flow, 2)}"
+                        f" = {density}"
+                    ),
+                    sql_executed=sql.strip(),
+                    input_records=overlapped,
+                    valid_records=overlapped,
+                    quality_issues=calc_issues,
+                )
+        except Exception as e:
+            return CalculationResult(
+                metric_name=self.metric_name, value=None, unit=self.unit,
+                status="failed", formula=self.formula,
+                quality_issues=[{"type": "error", "description": str(e)}],
+            )
+
+
+class ChilledPumpEnergyDensityMetric(_PumpEnergyDensityMetric):
+    """冷冻泵能耗密度"""
+
+    @property
+    def metric_name(self) -> str:
+        return "冷冻泵能耗密度"
+
+    @property
+    def formula(self) -> str:
+        return "冷冻泵能耗密度 = 冷冻泵电耗(kWh) / 冷冻水流量(m³/h)，按小时对齐"
+
+    @property
+    def _pump_equipment_type(self) -> str:
+        return "chilled_pump"
+
+    @property
+    def _flow_metric_name(self) -> str:
+        return "chilled_flow"
+
+
+class CoolingPumpEnergyDensityMetric(_PumpEnergyDensityMetric):
+    """冷却泵能耗密度"""
+
+    @property
+    def metric_name(self) -> str:
+        return "冷却泵能耗密度"
+
+    @property
+    def formula(self) -> str:
+        return "冷却泵能耗密度 = 冷却泵电耗(kWh) / 冷却水流量(m³/h)，按小时对齐"
+
+    @property
+    def _pump_equipment_type(self) -> str:
+        return "cooling_pump"
+
+    @property
+    def _flow_metric_name(self) -> str:
+        return "cooling_flow"

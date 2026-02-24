@@ -1,9 +1,11 @@
 import { useMemo } from 'react';
 import { Row, Col, Card, Typography, Space, Spin, Tag, Tooltip } from 'antd';
 import { useNavigate } from 'react-router-dom';
-import type { MetricResult, MetricStatus } from '../../api/types';
+import { useQueries } from '@tanstack/react-query';
+import type { MetricResult, MetricStatus, MetricBatchResponse } from '../../api/types';
+import { calculateMetricBatch } from '../../api/metricsApi';
 import { VISIBLE_METRIC_CATEGORIES } from '../../constants/metricCategories';
-import { useMetricBatchCalculate } from '../../hooks/useMetrics';
+import { getMetricFilterConfig } from '../../constants/metricFilterConfig';
 
 const { Text, Link } = Typography;
 
@@ -37,6 +39,34 @@ function toItem(result?: MetricResult): MetricCardItem {
   };
 }
 
+interface MetricGroup {
+  equipmentType: string;
+  metricNames: string[];
+}
+
+/**
+ * Group metrics by their fixedEquipmentType so each batch call uses the
+ * correct equipment_type filter — matching the Detail page's canonical scope.
+ * equipmentType '' means no fixedEquipmentType (system-level metrics).
+ */
+function groupMetricsByEquipmentType(metrics: string[]): MetricGroup[] {
+  const map = new Map<string, string[]>();
+  for (const name of metrics) {
+    const config = getMetricFilterConfig(name);
+    const key = config.fixedEquipmentType ?? '';
+    const list = map.get(key);
+    if (list) {
+      list.push(name);
+    } else {
+      map.set(key, [name]);
+    }
+  }
+  return [...map.entries()].map(([equipmentType, metricNames]) => ({
+    equipmentType,
+    metricNames,
+  }));
+}
+
 export default function MetricCategoryCards({ timeRange }: Props) {
   const navigate = useNavigate();
 
@@ -45,21 +75,51 @@ export default function MetricCategoryCards({ timeRange }: Props) {
     [],
   );
 
-  const batchQuery = useMetricBatchCalculate(allMetrics, {
-    time_start: timeRange[0],
-    time_end: timeRange[1],
+  // Stable grouping derived from static config — won't change between renders
+  const groups = useMemo(() => groupMetricsByEquipmentType(allMetrics), [allMetrics]);
+
+  // Fire one batch query per equipment_type group using useQueries (hooks-safe)
+  const groupQueries = useQueries({
+    queries: groups.map(({ equipmentType, metricNames }) => ({
+      queryKey: [
+        'metrics',
+        'calculate_batch',
+        metricNames,
+        {
+          time_start: timeRange[0],
+          time_end: timeRange[1],
+          equipment_type: equipmentType || undefined,
+        },
+      ],
+      queryFn: () =>
+        calculateMetricBatch(metricNames, {
+          time_start: timeRange[0],
+          time_end: timeRange[1],
+          ...(equipmentType ? { equipment_type: equipmentType } : {}),
+        }),
+      enabled: !!timeRange[0] && !!timeRange[1],
+      staleTime: 60 * 1000,
+    })),
   });
+
+  const isLoading = groupQueries.some((q) => q.isLoading);
 
   const resultMap = useMemo(() => {
     const map: Record<string, MetricCardItem> = {};
-    const resultItems = batchQuery.data?.items ?? [];
-    const byName = new Map(resultItems.map((item) => [item.metric_name, item]));
-
-    allMetrics.forEach((name) => {
-      map[name] = toItem(byName.get(name));
-    });
+    for (const query of groupQueries) {
+      const data = query.data as MetricBatchResponse | undefined;
+      for (const item of data?.items ?? []) {
+        map[item.metric_name] = toItem(item);
+      }
+    }
+    for (const name of allMetrics) {
+      if (!map[name]) {
+        map[name] = toItem(undefined);
+      }
+    }
     return map;
-  }, [allMetrics, batchQuery.data?.items]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allMetrics, ...groupQueries.map((q) => q.data)]);
 
   return (
     <Row gutter={[16, 16]}>
@@ -95,7 +155,7 @@ export default function MetricCategoryCards({ timeRange }: Props) {
                       <Text style={{ fontSize: 13 }}>{metricName}</Text>
                     </Link>
 
-                    {batchQuery.isLoading ? (
+                    {isLoading ? (
                       <Spin size="small" />
                     ) : (
                       <Space size={4}>

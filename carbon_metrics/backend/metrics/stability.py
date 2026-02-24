@@ -90,6 +90,7 @@ class _RuntimeRatioMetric(BaseMetric):
 
         try:
             with self.db.cursor() as cursor:
+                cursor.execute("SET @ndc_threshold = %s", [clamp_threshold])
                 selected_metric: Optional[str] = None
                 selected_row = None
                 selected_sql = ""
@@ -106,25 +107,25 @@ class _RuntimeRatioMetric(BaseMetric):
                             ) AS total_runtime,
                             SUM(
                                 CASE
-                                    WHEN agg_delta < 0 AND agg_delta >= -%s THEN agg_delta
+                                    WHEN agg_delta < 0 AND agg_delta >= -@ndc_threshold THEN agg_delta
                                     ELSE 0
                                 END
                             ) AS clamped_negative_total,
                             SUM(
                                 CASE
-                                    WHEN agg_delta < 0 AND agg_delta >= -%s THEN 1
+                                    WHEN agg_delta < 0 AND agg_delta >= -@ndc_threshold THEN 1
                                     ELSE 0
                                 END
                             ) AS clamped_negative_count,
                             SUM(
                                 CASE
-                                    WHEN agg_delta < -%s THEN agg_delta
+                                    WHEN agg_delta < -@ndc_threshold THEN agg_delta
                                     ELSE 0
                                 END
                             ) AS severe_negative_total,
                             SUM(
                                 CASE
-                                    WHEN agg_delta < -%s THEN 1
+                                    WHEN agg_delta < -@ndc_threshold THEN 1
                                     ELSE 0
                                 END
                             ) AS severe_negative_count,
@@ -133,13 +134,7 @@ class _RuntimeRatioMetric(BaseMetric):
                         FROM agg_hour
                         WHERE {where}
                     """
-                    query_params: List[Any] = [
-                        clamp_threshold,
-                        clamp_threshold,
-                        clamp_threshold,
-                        clamp_threshold,
-                        *params,
-                    ]
+                    query_params: List[Any] = [*params]
                     cursor.execute(sql, query_params)
                     row = cursor.fetchone()
                     if row and int(row["record_count"] or 0) > 0:
@@ -164,11 +159,9 @@ class _RuntimeRatioMetric(BaseMetric):
                     )
 
                 total_runtime = float(selected_row["total_runtime"] or 0)
+                record_count = int(selected_row["record_count"] or 0)
                 device_count = max(1, int(selected_row["device_count"] or 0))
-
-                delta = ctx.time_end - ctx.time_start
-                period_hours = max(0.0, delta.total_seconds() / 3600)
-                max_runtime = period_hours * device_count
+                max_runtime = float(record_count)  # 最小可算：实际有数据的设备·小时
 
                 ratio = 0.0 if max_runtime == 0 else round(total_runtime / max_runtime * 100, 2)
 
@@ -246,11 +239,30 @@ class _RuntimeRatioMetric(BaseMetric):
                         "details": {"raw_ratio": round(ratio, 2)},
                     })
 
+                delta = ctx.time_end - ctx.time_start
+                period_hours = max(0.0, delta.total_seconds() / 3600)
+                theoretical_max = period_hours * device_count
+                calc_issues.append({
+                    "type": "minimum_calculable_principle",
+                    "description": (
+                        f"运行时长占比基于实际有数据的 {record_count} 设备·小时计算"
+                        f"（理论最大 {round(theoretical_max, 1)} = {round(period_hours, 1)}h × {device_count}台）"
+                    ),
+                    "details": {
+                        "intersection_hours": record_count,
+                        "expected_hours": int(round(theoretical_max)),
+                        "actual_device_hours": record_count,
+                        "theoretical_device_hours": round(theoretical_max, 1),
+                        "device_count": device_count,
+                        "period_hours": round(period_hours, 1),
+                        "coverage_rate": round(record_count / theoretical_max * 100, 1) if theoretical_max > 0 else 0,
+                    },
+                })
+
                 all_issues = quality_issues + calc_issues
                 formula_with_values = (
-                    f"= {round(total_runtime, 1)}h"
-                    f" / ({round(period_hours, 2)}h x {device_count}台"
-                    f" = {ratio}%"
+                    f"= {round(total_runtime, 1)}h / {record_count}设备·小时"
+                    f" ({device_count}台设备, 实际覆盖) = {ratio}%"
                 )
 
                 return CalculationResult(

@@ -19,8 +19,10 @@ logger = logging.getLogger(__name__)
 class Database:
     """数据库连接管理类"""
 
-    def __init__(self, config: DatabaseConfig = None, pool_size: int = 4):
+    def __init__(self, config: DatabaseConfig = None, pool_size: int = None):
         self.config = config or get_db_config()
+        if pool_size is None:
+            pool_size = Database._parse_pool_size()
         self._pool: Queue[pymysql.Connection] = Queue(maxsize=pool_size)
         self._pool_size = pool_size
         self._lock = threading.Lock()
@@ -60,6 +62,15 @@ class Database:
         except (TypeError, ValueError):
             logger.warning("Invalid %s=%r, expected integer", env_key, raw_value)
             return None
+
+    @staticmethod
+    def _parse_pool_size() -> int:
+        raw = os.getenv("DB_POOL_SIZE", "8").strip()
+        try:
+            val = int(raw)
+            return max(2, min(val, 32))
+        except (TypeError, ValueError):
+            return 8
 
     def _create_connection(self) -> pymysql.Connection:
         """创建新的数据库连接"""

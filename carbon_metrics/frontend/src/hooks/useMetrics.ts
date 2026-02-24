@@ -46,7 +46,7 @@ export function useMetricCalculateBySubScopes(
   const ready = enabled && !!metric_name && !!filters.time_start && !!filters.time_end;
   return useQueries({
     queries: scopes.map((scope) => ({
-      queryKey: ['metrics', 'calculate', metric_name, baseFilters, scope],
+      queryKey: ['metrics', 'calculate', metric_name, { ...baseFilters, sub_equipment_id: scope }],
       queryFn: () =>
         calculateMetric(metric_name, {
           ...baseFilters,
