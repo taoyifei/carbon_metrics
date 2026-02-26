@@ -31,3 +31,6 @@ D:\Github\carbon_metrics\.sisyphus/
 # oh-my-opencode artifacts
 .sisyphus/
 
+AGENTS.md
+
+.vscode/
