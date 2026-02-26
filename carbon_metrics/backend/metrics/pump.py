@@ -167,8 +167,8 @@ class _PumpEnergyDensityMetric(BaseMetric):
         """
         try:
             with self.db.cursor() as cursor:
-                cursor.execute("SET @pdc_threshold = %s", [self._positive_delta_clamp_threshold])
-                cursor.execute("SET @incr_threshold = %s", [500.0])
+                cursor.execute("SET @pdc_threshold = %s, @incr_threshold = %s",
+                               [self._positive_delta_clamp_threshold, 500.0])
                 cursor.execute(sql, params_energy + params_flow + params_energy)
                 row = cursor.fetchone()
                 if not row or int(row["overlapped_hours"] or 0) == 0:

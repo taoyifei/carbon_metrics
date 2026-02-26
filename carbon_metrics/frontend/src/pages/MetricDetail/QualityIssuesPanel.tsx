@@ -425,7 +425,7 @@ function IssueDetailBlock({ issue }: { issue: QualityIssue }): ReactNode {
           <Text strong>缺失依赖指标</Text>
           <Table<DependencyRow>
             size="small"
-            pagination={false}
+            pagination={{ pageSize: 10, showSizeChanger: true, showTotal: (total: number) => `共 ${total} 条` }}
             rowKey="key"
             style={{ marginTop: 6 }}
             columns={[
@@ -442,7 +442,7 @@ function IssueDetailBlock({ issue }: { issue: QualityIssue }): ReactNode {
           <Text strong>当前范围已有指标</Text>
           <Table<DependencyRow>
             size="small"
-            pagination={false}
+            pagination={{ pageSize: 10, showSizeChanger: true, showTotal: (total: number) => `共 ${total} 条` }}
             rowKey="key"
             style={{ marginTop: 6 }}
             columns={[
@@ -459,7 +459,7 @@ function IssueDetailBlock({ issue }: { issue: QualityIssue }): ReactNode {
           <Text strong>缺失组件</Text>
           <Table<SimpleRow>
             size="small"
-            pagination={false}
+            pagination={{ pageSize: 10, showSizeChanger: true, showTotal: (total: number) => `共 ${total} 条` }}
             rowKey="key"
             style={{ marginTop: 6 }}
             columns={[{ title: '组件', dataIndex: 'value', key: 'value' }]}
@@ -473,7 +473,7 @@ function IssueDetailBlock({ issue }: { issue: QualityIssue }): ReactNode {
           <Text strong>各组件数据覆盖</Text>
           <Table<SimpleRow>
             size="small"
-            pagination={false}
+            pagination={{ pageSize: 10, showSizeChanger: true, showTotal: (total: number) => `共 ${total} 条` }}
             rowKey="key"
             style={{ marginTop: 6 }}
             columns={[{ title: '组件覆盖小时数', dataIndex: 'value', key: 'value' }]}
@@ -487,7 +487,7 @@ function IssueDetailBlock({ issue }: { issue: QualityIssue }): ReactNode {
           <Text strong>缺失原因诊断（DB / mapping / raw）</Text>
           <Table<MissingDiagnosticRow>
             size="small"
-            pagination={false}
+            pagination={{ pageSize: 10, showSizeChanger: true, showTotal: (total: number) => `共 ${total} 条` }}
             rowKey="key"
             style={{ marginTop: 6 }}
             scroll={{ x: 1080 }}
@@ -511,7 +511,7 @@ function IssueDetailBlock({ issue }: { issue: QualityIssue }): ReactNode {
           <Text strong>未命中 mapping 的 tag 样本（Top）</Text>
           <Table<UnmappedTagRow>
             size="small"
-            pagination={false}
+            pagination={{ pageSize: 10, showSizeChanger: true, showTotal: (total: number) => `共 ${total} 条` }}
             rowKey="key"
             style={{ marginTop: 6 }}
             columns={[
@@ -546,7 +546,7 @@ function IssueDetailBlock({ issue }: { issue: QualityIssue }): ReactNode {
           {!useDeviceBucketTable ? (
             <Table<MissingBucketRow>
               size="small"
-              pagination={false}
+              pagination={{ pageSize: 10, showSizeChanger: true, showTotal: (total: number) => `共 ${total} 条` }}
               rowKey="key"
               style={{ marginTop: 6 }}
               scroll={{ x: 900 }}
@@ -568,7 +568,7 @@ function IssueDetailBlock({ issue }: { issue: QualityIssue }): ReactNode {
           ) : (
             <Table<MissingBucketDeviceRow>
               size="small"
-              pagination={false}
+              pagination={{ pageSize: 10, showSizeChanger: true, showTotal: (total: number) => `共 ${total} 条` }}
               rowKey="key"
               style={{ marginTop: 6 }}
               scroll={{ x: 1560 }}
@@ -606,7 +606,7 @@ function IssueDetailBlock({ issue }: { issue: QualityIssue }): ReactNode {
           <Text strong>超阈值负值分布（Top）</Text>
           <Table<SevereNegativeTypeRow>
             size="small"
-            pagination={false}
+            pagination={{ pageSize: 10, showSizeChanger: true, showTotal: (total: number) => `共 ${total} 条` }}
             rowKey="key"
             style={{ marginTop: 6 }}
             columns={[
@@ -624,7 +624,7 @@ function IssueDetailBlock({ issue }: { issue: QualityIssue }): ReactNode {
           <Text strong>疑似传感器偏置点位</Text>
           <Table<SensorBiasRow>
             size="small"
-            pagination={false}
+            pagination={{ pageSize: 10, showSizeChanger: true, showTotal: (total: number) => `共 ${total} 条` }}
             rowKey="key"
             style={{ marginTop: 6 }}
             columns={[{ title: '疑似传感器偏置点位', dataIndex: 'point', key: 'point' }]}

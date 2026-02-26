@@ -146,19 +146,28 @@ def _query_energy_by_type(
     try:
         query_params: List[Any] = [*params, *params]
         cache_key = ("energy_by_type", sql.strip(), clamp_threshold, positive_clamp_threshold, tuple(str(p) for p in params))
-        if query_cache is not None and cache_key in query_cache:
-            rows = query_cache[cache_key]
-            return rows, sql.strip(), None
+        if query_cache is not None:
+            lock = getattr(query_cache, 'lock', None)
+            if lock is not None:
+                with lock:
+                    if cache_key in query_cache:
+                        return query_cache[cache_key], sql.strip(), None
+            elif cache_key in query_cache:
+                return query_cache[cache_key], sql.strip(), None
 
         with db.cursor() as cursor:
-            cursor.execute("SET @ndc_threshold = %s", [clamp_threshold])
-            cursor.execute("SET @pdc_threshold = %s", [positive_clamp_threshold])
-            cursor.execute("SET @incr_threshold = %s", [_INCREMENTAL_DATA_THRESHOLD])
+            cursor.execute("SET @ndc_threshold = %s, @pdc_threshold = %s, @incr_threshold = %s",
+                           [clamp_threshold, positive_clamp_threshold, _INCREMENTAL_DATA_THRESHOLD])
             cursor.execute(sql, query_params)
             rows = cursor.fetchall()
 
         if query_cache is not None:
-            query_cache[cache_key] = rows
+            lock = getattr(query_cache, 'lock', None)
+            if lock is not None:
+                with lock:
+                    query_cache[cache_key] = rows
+            else:
+                query_cache[cache_key] = rows
         return rows, sql.strip(), None
     except Exception as e:
         return None, sql.strip(), str(e)
@@ -230,19 +239,28 @@ def _query_energy_by_bucket_type(
     try:
         query_params: List[Any] = [*params, *params]
         cache_key = ("energy_by_bucket", sql.strip(), clamp_threshold, positive_clamp_threshold, tuple(str(p) for p in params))
-        if query_cache is not None and cache_key in query_cache:
-            rows = query_cache[cache_key]
-            return rows, sql.strip(), None
+        if query_cache is not None:
+            lock = getattr(query_cache, 'lock', None)
+            if lock is not None:
+                with lock:
+                    if cache_key in query_cache:
+                        return query_cache[cache_key], sql.strip(), None
+            elif cache_key in query_cache:
+                return query_cache[cache_key], sql.strip(), None
 
         with db.cursor() as cursor:
-            cursor.execute("SET @ndc_threshold = %s", [clamp_threshold])
-            cursor.execute("SET @pdc_threshold = %s", [positive_clamp_threshold])
-            cursor.execute("SET @incr_threshold = %s", [_INCREMENTAL_DATA_THRESHOLD])
+            cursor.execute("SET @ndc_threshold = %s, @pdc_threshold = %s, @incr_threshold = %s",
+                           [clamp_threshold, positive_clamp_threshold, _INCREMENTAL_DATA_THRESHOLD])
             cursor.execute(sql, query_params)
             rows = cursor.fetchall()
 
         if query_cache is not None:
-            query_cache[cache_key] = rows
+            lock = getattr(query_cache, 'lock', None)
+            if lock is not None:
+                with lock:
+                    query_cache[cache_key] = rows
+            else:
+                query_cache[cache_key] = rows
         return rows, sql.strip(), None
     except Exception as e:
         return None, sql.strip(), str(e)
