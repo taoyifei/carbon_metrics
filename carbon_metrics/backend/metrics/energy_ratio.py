@@ -1,18 +1,15 @@
 """能耗占比类指标计算"""
 from math import ceil
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Dict, List, Any
 
 from .base import BaseMetric, MetricContext, CalculationResult
 from .energy import (
     CHILLER_TYPES, PUMP_TYPES, TOWER_TYPES,
-    COMPONENT_RULES, COMPONENT_LABELS, STRICT_INTERSECTION_KEYS,
-    _INCREMENTAL_DATA_THRESHOLD,
+    COMPONENT_LABELS, STRICT_INTERSECTION_KEYS,
     _component_key_for_type,
     _query_energy_by_type,
     _query_energy_by_bucket_type,
     _aggregate_energy,
-    _format_bucket,
-    _build_minimum_calculable_summary,
     _build_negative_delta_issues,
 )
 
@@ -72,8 +69,8 @@ class _EnergyRatioBase(BaseMetric):
                     total_records,
                     breakdown,
                     component_totals,
-                    component_record_counts,
-                    scoped_extra_types,
+                    _,
+                    _,
                     negative_summary,
                 ) = _aggregate_energy(rows)
 
@@ -142,10 +139,9 @@ class _EnergyRatioBase(BaseMetric):
                     quality_issues=[{"type": "error", "description": bucket_error}],
                 )
 
-            # ----------------------------------------------------------
             # 最小可计算原则（严格交集）：
-            # 要求该小时四类组件(chiller/chilled_pump/cooling_pump/tower)齐全，且总能耗 > 0
-            # ----------------------------------------------------------
+            # 该小时四类组件(chiller/chilled_pump/cooling_pump/tower)齐全，且总能耗 > 0
+            
             expected_hours = max(
                 1,
                 int(ceil((ctx.time_end - ctx.time_start).total_seconds() / 3600)),
