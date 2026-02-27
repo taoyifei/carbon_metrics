@@ -6,14 +6,15 @@ import os
 import logging
 from logging.handlers import RotatingFileHandler
 from concurrent.futures import ThreadPoolExecutor
+import threading
 from datetime import datetime
 from collections import Counter
 from typing import Any, Dict, List, Optional, Type
 
 from ..db import Database, get_db
 from ..metrics.base import BaseMetric, MetricContext, CalculationResult
-from ..metrics.energy import (
-    TotalEnergyMetric,
+from ..metrics.energy import TotalEnergyMetric
+from ..metrics.energy_ratio import (
     ChillerEnergyRatioMetric,
     PumpEnergyRatioMetric,
     TowerEnergyRatioMetric,
@@ -61,6 +62,25 @@ if not _has_file_handler:
     )
     _handler.setFormatter(logging.Formatter("%(asctime)s | %(message)s"))
     calc_logger.addHandler(_handler)
+
+class ThreadSafeCache:
+    """Thread-safe dict wrapper for parallel batch query caching."""
+    def __init__(self):
+        self._data: Dict[str, Any] = {}
+        self._lock = threading.Lock()
+
+    @property
+    def lock(self) -> threading.Lock:
+        return self._lock
+
+    def __contains__(self, key):
+        return key in self._data
+
+    def __getitem__(self, key):
+        return self._data[key]
+
+    def __setitem__(self, key, value):
+        self._data[key] = value
 
 
 class MetricCalculator:
@@ -213,21 +233,6 @@ class MetricCalculator:
         metrics = list(metric_names)
         workers = min(self._resolve_calc_workers(), len(metrics))
 
-        def run_single(name: str) -> CalculationResult:
-            return self.calculate(
-                metric_name=name,
-                time_start=time_start,
-                time_end=time_end,
-                building_id=building_id,
-                system_id=system_id,
-                equipment_type=equipment_type,
-                equipment_id=equipment_id,
-                sub_equipment_id=sub_equipment_id,
-                log_result=log_result,
-                query_cache=None,
-                include_dependency_diagnostics=include_dependency_diagnostics,
-            )
-
         if workers <= 1:
             shared_cache: Dict[str, Any] = {}
             return [
@@ -246,6 +251,23 @@ class MetricCalculator:
                 )
                 for name in metrics
             ]
+
+        parallel_cache: Any = ThreadSafeCache()
+
+        def run_single(name: str) -> CalculationResult:
+            return self.calculate(
+                metric_name=name,
+                time_start=time_start,
+                time_end=time_end,
+                building_id=building_id,
+                system_id=system_id,
+                equipment_type=equipment_type,
+                equipment_id=equipment_id,
+                sub_equipment_id=sub_equipment_id,
+                log_result=log_result,
+                query_cache=parallel_cache,
+                include_dependency_diagnostics=include_dependency_diagnostics,
+            )
 
         with ThreadPoolExecutor(max_workers=workers) as executor:
             return list(executor.map(run_single, metrics))

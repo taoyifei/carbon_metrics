@@ -291,12 +291,22 @@ class BaseMetric(ABC):
         """带缓存的 fetchone，相同 SQL+params 只查一次"""
         if self._query_cache is not None:
             key = ("fetchone", sql.strip(), tuple(str(p) for p in params))
-            if key in self._query_cache:
-                return self._query_cache[key]
-            cursor.execute(sql, params)
-            row = cursor.fetchone()
-            self._query_cache[key] = row
-            return row
+            lock = getattr(self._query_cache, 'lock', None)
+            if lock is not None:
+                with lock:
+                    if key in self._query_cache:
+                        return self._query_cache[key]
+                    cursor.execute(sql, params)
+                    row = cursor.fetchone()
+                    self._query_cache[key] = row
+                    return row
+            else:
+                if key in self._query_cache:
+                    return self._query_cache[key]
+                cursor.execute(sql, params)
+                row = cursor.fetchone()
+                self._query_cache[key] = row
+                return row
         cursor.execute(sql, params)
         return cursor.fetchone()
 
@@ -304,12 +314,22 @@ class BaseMetric(ABC):
         """带缓存的 fetchall，相同 SQL+params 只查一次"""
         if self._query_cache is not None:
             key = ("fetchall", sql.strip(), tuple(str(p) for p in params))
-            if key in self._query_cache:
-                return self._query_cache[key]
-            cursor.execute(sql, params)
-            rows = cursor.fetchall()
-            self._query_cache[key] = rows
-            return rows
+            lock = getattr(self._query_cache, 'lock', None)
+            if lock is not None:
+                with lock:
+                    if key in self._query_cache:
+                        return self._query_cache[key]
+                    cursor.execute(sql, params)
+                    rows = cursor.fetchall()
+                    self._query_cache[key] = rows
+                    return rows
+            else:
+                if key in self._query_cache:
+                    return self._query_cache[key]
+                cursor.execute(sql, params)
+                rows = cursor.fetchall()
+                self._query_cache[key] = rows
+                return rows
         cursor.execute(sql, params)
         return cursor.fetchall()
 

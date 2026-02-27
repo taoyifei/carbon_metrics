@@ -6,6 +6,33 @@
 - **前端**：管理界面，基于 React 18 + TypeScript + Ant Design 5，提供总览、数据质量、指标计算、设备管理四个页面。
 - **数据库**：MySQL `cooling_system_v2`，数据范围 2025-07-01 ~ 2026-01-20，116 台设备（冷机 31 + 水泵 70 + 冷却塔 15）。
 
+## Latest Update (2026-02-26)
+
+- `carbon_metrics/backend/services/metric_calculator.py`:
+  - 修复并行批量计算的 thundering herd 问题：并行模式（`METRIC_CALC_WORKERS > 1`）下，各线程原先各自独立查询数据库（`query_cache=None`），相同 SQL 重复执行 N 次。现新增 `ThreadSafeCache` 线程安全缓存包装类，并行路径共享同一缓存实例，相同查询只执行一次。
+  - `ThreadSafeCache` 使用 `threading.Lock` 保护读写操作，防止缓存 stampede。
+- `carbon_metrics/backend/metrics/base.py`:
+  - `_cached_fetchone` / `_cached_fetchall` 新增锁感知逻辑：通过 `getattr(cache, 'lock', None)` 检测缓存是否为线程安全实例，是则在 check-execute-store 全程加锁；普通 dict 缓存（串行模式）无额外开销。
+- `carbon_metrics/backend/metrics/energy.py`, `pump.py`, `tower.py`:
+  - MySQL 会话变量 SET 语句合并：`energy.py` 每个查询函数的 3 条 `SET @var` 合并为 1 条（6→2），`pump.py`（2→1）、`tower.py`（2→1），总计减少 6 次 DB 网络往返。
+- `carbon_metrics/backend/metrics/energy.py`:
+  - 内联缓存检查（`_query_energy_by_type`、`_query_energy_by_bucket_type`）同步适配锁感知模式，与 `base.py` 保持一致。
+- `carbon_metrics/backend/db.py`:
+  - 新增注释：建议 `DB_POOL_SIZE >= METRIC_CALC_WORKERS` 以避免并行计算时频繁创建新连接。
+- `carbon_metrics/frontend/src/pages/MetricDetail/QualityIssuesPanel.tsx`:
+  - 修复前端能耗页面崩溃：10 个 `pagination={false}` 的 Table 改为分页模式（`pageSize: 10, showSizeChanger: true`），避免大数据量渲染导致浏览器 OOM。
+- `carbon_metrics/frontend/src/components/ErrorBoundary.tsx`（新增）:
+  - React Error Boundary 组件：捕获渲染异常，展示 Ant Design `Result` 错误页面并提供刷新按钮。支持 `resetKey`（绑定 `location.pathname`），页面导航时自动重置错误状态。
+- `carbon_metrics/frontend/src/App.tsx`:
+  - 路由层包裹 `<ErrorBoundary>`，防止单页面渲染崩溃导致整个应用白屏。
+- 新增 pytest 测试基础设施：
+  - `pytest.ini` + `tests/conftest.py`（4 个共享 fixture）
+  - `tests/test_cache.py`：ThreadSafeCache 基本操作、线程安全、并行路径缓存验证（6 tests）
+  - `tests/test_set_merge.py`：SET 语句合并计数验证（5 tests）
+  - `tests/test_frontend_build.py`：前端构建通过性验证（1 test）
+
+---
+
 ## Latest Update (2026-02-24)
 
 - `carbon_metrics/backend/metrics/energy.py`:
@@ -310,6 +337,7 @@ src/
 - `SENSOR_BIAS_POINT_BLACKLIST` 用于标记重点关注点位，命中后会输出 `sensor_bias` 质量告警。
 - `冷机COP` 分母口径使用冷机主功率（`sub_equipment_id in (NULL,'','main')`），不与 `backup` 混算。
 - `POSITIVE_DELTA_CLAMP_THRESHOLD` 用于过滤电表重置导致的异常大正增量；与 `NEGATIVE_DELTA_CLAMP_THRESHOLD` 互补，分别处理正/负方向的噪声。
+- 部署建议：`DB_POOL_SIZE` 应 >= `METRIC_CALC_WORKERS`，避免并行计算时频繁创建新连接。低配服务器建议设置 `METRIC_CALC_WORKERS=1`，此时后端走串行计算并启用共享查询缓存，减少重复 SQL 查询。
 
 ---
 

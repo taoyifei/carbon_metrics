@@ -63,6 +63,7 @@ class Database:
             logger.warning("Invalid %s=%r, expected integer", env_key, raw_value)
             return None
 
+    # Recommended: DB_POOL_SIZE >= METRIC_CALC_WORKERS to avoid connection churn during parallel batch calculation
     @staticmethod
     def _parse_pool_size() -> int:
         raw = os.getenv("DB_POOL_SIZE", "8").strip()
