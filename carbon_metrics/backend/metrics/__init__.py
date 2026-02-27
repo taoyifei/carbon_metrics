@@ -2,8 +2,8 @@
 指标模块
 """
 from .base import BaseMetric, MetricContext, CalculationResult
-from .energy import (
-    TotalEnergyMetric,
+from .energy import TotalEnergyMetric
+from .energy_ratio import (
     ChillerEnergyRatioMetric,
     PumpEnergyRatioMetric,
     TowerEnergyRatioMetric,

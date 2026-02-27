@@ -13,8 +13,8 @@ from typing import Any, Dict, List, Optional, Type
 
 from ..db import Database, get_db
 from ..metrics.base import BaseMetric, MetricContext, CalculationResult
-from ..metrics.energy import (
-    TotalEnergyMetric,
+from ..metrics.energy import TotalEnergyMetric
+from ..metrics.energy_ratio import (
     ChillerEnergyRatioMetric,
     PumpEnergyRatioMetric,
     TowerEnergyRatioMetric,
