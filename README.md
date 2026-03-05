@@ -8,6 +8,11 @@
 
 ## Latest Update (2026-03-04)
 
+- `carbon_metrics/backend/metrics/chiller.py`:
+  - **修复冷机指标 sub_equipment_id 过滤问题**: 冷机平均负载率、最大负载率、波动系数在详情页计算失败，显示"缺少依赖数据: load_rate, load_ratio"。
+  - **根因**: 依赖检查和数据查询复用了业务指标的 `sub_equipment_id` 过滤条件，导致基础依赖数据（`load_rate`/`load_ratio`）被错误过滤。
+  - **解决方案**: 新增 `ctx_without_sub`（`sub_equipment_id=None`）用于基础数据依赖检查与查询，仅在业务结果聚合阶段应用用户选择的子设备口径。
+  - **影响范围**: 仅调整冷机负载相关指标（平均负载率、最大负载率、波动系数）的依赖查询路径，不影响其他指标计算逻辑。
 - `carbon_metrics/frontend/src/hooks/useMetrics.ts`:
   - 修复指标切换卡顿问题：为 `useMetricCalculate` 和 `useMetricCalculateBySubScopes` 添加 800ms 防抖，避免快速切换指标时触发大量并发请求。
   - 防抖机制与 `useMetricCoverage` 保持一致，使用 `useState + useEffect + setTimeout` 模式。
