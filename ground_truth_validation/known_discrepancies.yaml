@@ -1,0 +1,63 @@
+# Known Discrepancies Configuration
+# Documents expected differences between Ground Truth and Backend calculations
+
+discrepancies:
+  # COP Metrics - Backend uses power (kW) vs GT uses energy (kWh)
+  - metric: "冷机COP"
+    type: "unit_mismatch"
+    severity: "high"
+    description: "Backend uses instantaneous power (kW), GT uses energy consumption (kWh)"
+    expected_difference: "10-30%"
+    reason: "Backend: SUM(agg_avg power) / GT: SUM(energy.diff())"
+    
+  - metric: "制冷系统COP"
+    type: "unit_mismatch"
+    severity: "high"
+    description: "Backend uses system power (kW), GT uses system energy (kWh)"
+    expected_difference: "10-30%"
+    reason: "Same as 冷机COP - power vs energy denominator"
+
+  # Temperature Sensors - Some buildings have swapped supply/return labels
+  - metric: "冷却水供水温度"
+    type: "sensor_label_swap"
+    severity: "high"
+    description: "G11-3 cooling water supply/return labels are swapped"
+    affected_buildings: ["G11-3"]
+    expected_difference: "Temperature values inverted"
+    
+  - metric: "冷却水回水温度"
+    type: "sensor_label_swap"
+    severity: "high"
+    description: "G11-3 cooling water supply/return labels are swapped"
+    affected_buildings: ["G11-3"]
+    expected_difference: "Temperature values inverted"
+
+  # Flow Aggregation - GT distinguishes sum vs average, backend uses uniform average
+  - metric: "制冷量"
+    type: "aggregation_method"
+    severity: "medium"
+    description: "GT sums multi-pipe flows, averages multi-sensor readings. Backend uses AVG(agg_avg) uniformly"
+    expected_difference: "5-15% in multi-pipe scenarios"
+    reason: "GT: sum(pipes) + avg(sensors), Backend: avg(all)"
+
+  # Threshold Differences
+  - metric: "冷机COP"
+    type: "threshold_difference"
+    severity: "medium"
+    description: "GT filters energy > 150 kWh, Backend filters power > 20 kW"
+    expected_difference: "Different hours included in calculation"
+    
+  - metric: "制冷系统COP"
+    type: "threshold_difference"
+    severity: "medium"
+    description: "GT filters energy > 150 kWh, Backend filters power > 20 kW"
+    expected_difference: "Different hours included in calculation"
+
+# Tolerance settings per metric type
+tolerance:
+  temperature: 0.001  # 0.1% - very precise
+  flow: 0.01          # 1% - sensor accuracy
+  energy: 0.001       # 0.1% - cumulative values
+  ratio: 0.02         # 2% - derived metrics
+  cop: 0.05           # 5% - known unit mismatch
+  default: 0.001      # 0.1% - general tolerance
