@@ -11,14 +11,22 @@ DEFAULT_COP_MIN_POWER_KW = 20.0
 
 
 def _select_load_metric(metric: BaseMetric, cursor, ctx: MetricContext) -> Optional[str]:
+    # Dependency probing should ignore sub_equipment scope because load metrics may
+    # be stored without main/backup split.
+    ctx_without_sub = MetricContext(
+        time_start=ctx.time_start,
+        time_end=ctx.time_end,
+        building_id=ctx.building_id,
+        system_id=ctx.system_id,
+        equipment_type=ctx.equipment_type,
+        equipment_id=ctx.equipment_id,
+        sub_equipment_id=None,
+    )
     for metric_name in LOAD_METRIC_CANDIDATES:
         where, params = metric._build_where(
-            ctx, metric_name, equipment_type="chiller")
-        cursor.execute(
-            f"SELECT COUNT(*) AS record_count FROM agg_hour WHERE {where}",
-            params,
-        )
-        row = cursor.fetchone()
+            ctx_without_sub, metric_name, equipment_type="chiller")
+        sql = f"SELECT COUNT(*) AS record_count FROM agg_hour WHERE {where}"
+        row = metric._cached_fetchone(cursor, sql, params)
         if row and int(row["record_count"] or 0) > 0:
             return metric_name
     return None
@@ -194,6 +202,15 @@ class ChillerMaxLoadMetric(BaseMetric):
                 quality_score, quality_issues = self._check_quality_from_table(
                     cursor, ctx, [selected_metric], equipment_type="chiller")
                 calc_issues = _fallback_issues(selected_metric)
+                if val > 100:
+                    calc_issues.append({
+                        "type": "equipment_overload",
+                        "description": "冷机负载率超过100%，设备处于过载运行状态",
+                        "details": {
+                            "max_load_rate": val,
+                            "overload_percentage": round(val - 100, 2),
+                        },
+                    })
                 all_issues = quality_issues + calc_issues
 
                 return CalculationResult(

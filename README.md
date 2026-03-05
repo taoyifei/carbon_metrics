@@ -6,6 +6,23 @@
 - **前端**：管理界面，基于 React 18 + TypeScript + Ant Design 5，提供总览、数据质量、指标计算、设备管理四个页面。
 - **数据库**：MySQL `cooling_system_v2`，数据范围 2025-07-01 ~ 2026-01-20，116 台设备（冷机 31 + 水泵 70 + 冷却塔 15）。
 
+## Latest Update (2026-03-04)
+
+- `carbon_metrics/frontend/src/hooks/useMetrics.ts`:
+  - 修复指标切换卡顿问题：为 `useMetricCalculate` 和 `useMetricCalculateBySubScopes` 添加 800ms 防抖，避免快速切换指标时触发大量并发请求。
+  - 防抖机制与 `useMetricCoverage` 保持一致，使用 `useState + useEffect + setTimeout` 模式。
+- `carbon_metrics/backend/metrics/chiller.py`:
+  - 新增设备过载告警：当冷机最大负载率 > 100% 时，添加 `equipment_overload` 质量问题，提示"冷机负载率超过100%，设备处于过载运行状态"。
+  - 告警包含详细信息：`max_load_rate`（实际值）和 `overload_percentage`（超载百分比）。
+  - 状态保持为 `partial`（警告），不影响数据有效性。负载率 > 100% 表示设备实际运行超出额定容量，属于真实运行状态而非数据错误。
+  - **性能优化**: 修复 `_select_load_metric()` 函数未使用查询缓存的问题，该函数为每个冷机指标执行 2 次 COUNT 查询检查依赖数据，导致批量计算时产生大量冗余查询。现改用 `_cached_fetchone()` 方法，相同查询只执行一次，显著提升计算性能。
+- **性能建议**:
+  - 对于大范围查询（如全月数据），建议设置 `DB_READ_TIMEOUT=60` 或更高，避免长查询超时。
+  - 服务器 MySQL `innodb_buffer_pool_size` 建议设置为物理内存的 50-75%（当前服务器 754GB RAM，建议 64G）。
+  - 确保 `DB_POOL_SIZE >= METRIC_CALC_WORKERS`，避免并行计算时连接池耗尽。
+
+---
+
 ## Latest Update (2026-02-26)
 
 - `carbon_metrics/backend/services/metric_calculator.py`:

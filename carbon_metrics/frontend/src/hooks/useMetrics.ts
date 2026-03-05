@@ -24,11 +24,27 @@ export function useMetricCalculate(
   filters: CommonFilters,
   enabled = true,
 ) {
+  const [debouncedMetricName, setDebouncedMetricName] = useState(metric_name);
+  const [debouncedFilters, setDebouncedFilters] = useState(filters);
+
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedMetricName(metric_name), 800);
+    return () => clearTimeout(timer);
+  }, [metric_name]);
+
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedFilters(filters), 800);
+    return () => clearTimeout(timer);
+  }, [JSON.stringify(filters)]);
+
   return useQuery({
-    queryKey: ['metrics', 'calculate', metric_name, filters],
-    queryFn: () => calculateMetric(metric_name, filters),
+    queryKey: ['metrics', 'calculate', debouncedMetricName, debouncedFilters],
+    queryFn: () => calculateMetric(debouncedMetricName, debouncedFilters),
     enabled:
-      enabled && !!metric_name && !!filters.time_start && !!filters.time_end,
+      enabled &&
+      !!debouncedMetricName &&
+      !!debouncedFilters.time_start &&
+      !!debouncedFilters.time_end,
     staleTime: 60 * 1000,
   });
 }
@@ -39,16 +55,38 @@ export function useMetricCalculateBySubScopes(
   scopes: Array<'main' | 'backup' | '__NULL__'>,
   enabled = true,
 ) {
+  const [debouncedMetricName, setDebouncedMetricName] = useState(metric_name);
+  const [debouncedFilters, setDebouncedFilters] = useState(filters);
+
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedMetricName(metric_name), 800);
+    return () => clearTimeout(timer);
+  }, [metric_name]);
+
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedFilters(filters), 800);
+    return () => clearTimeout(timer);
+  }, [JSON.stringify(filters)]);
+
   const baseFilters = {
-    ...filters,
+    ...debouncedFilters,
     sub_equipment_id: undefined,
   };
-  const ready = enabled && !!metric_name && !!filters.time_start && !!filters.time_end;
+  const ready =
+    enabled &&
+    !!debouncedMetricName &&
+    !!debouncedFilters.time_start &&
+    !!debouncedFilters.time_end;
   return useQueries({
     queries: scopes.map((scope) => ({
-      queryKey: ['metrics', 'calculate', metric_name, { ...baseFilters, sub_equipment_id: scope }],
+      queryKey: [
+        'metrics',
+        'calculate',
+        debouncedMetricName,
+        { ...baseFilters, sub_equipment_id: scope },
+      ],
       queryFn: () =>
-        calculateMetric(metric_name, {
+        calculateMetric(debouncedMetricName, {
           ...baseFilters,
           sub_equipment_id: scope,
         }),
