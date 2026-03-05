@@ -92,8 +92,17 @@ class ChillerAvgLoadMetric(BaseMetric):
                         quality_issues=missing_issues,
                     )
 
+                ctx_without_sub = MetricContext(
+                    time_start=ctx.time_start,
+                    time_end=ctx.time_end,
+                    building_id=ctx.building_id,
+                    system_id=ctx.system_id,
+                    equipment_type=ctx.equipment_type,
+                    equipment_id=ctx.equipment_id,
+                    sub_equipment_id=None,
+                )
                 where, params = self._build_where(
-                    ctx, selected_metric, equipment_type="chiller")
+                    ctx_without_sub, selected_metric, equipment_type="chiller")
                 sql = f"""
                     SELECT
                         AVG(agg_avg) AS avg_val,
@@ -174,8 +183,17 @@ class ChillerMaxLoadMetric(BaseMetric):
                         quality_issues=missing_issues,
                     )
 
+                ctx_without_sub = MetricContext(
+                    time_start=ctx.time_start,
+                    time_end=ctx.time_end,
+                    building_id=ctx.building_id,
+                    system_id=ctx.system_id,
+                    equipment_type=ctx.equipment_type,
+                    equipment_id=ctx.equipment_id,
+                    sub_equipment_id=None,
+                )
                 where, params = self._build_where(
-                    ctx, selected_metric, equipment_type="chiller")
+                    ctx_without_sub, selected_metric, equipment_type="chiller")
                 sql = f"""
                     SELECT
                         MAX(agg_max) AS max_val,
@@ -266,8 +284,17 @@ class ChillerLoadCvMetric(BaseMetric):
                         quality_issues=missing_issues,
                     )
 
+                ctx_without_sub = MetricContext(
+                    time_start=ctx.time_start,
+                    time_end=ctx.time_end,
+                    building_id=ctx.building_id,
+                    system_id=ctx.system_id,
+                    equipment_type=ctx.equipment_type,
+                    equipment_id=ctx.equipment_id,
+                    sub_equipment_id=None,
+                )
                 where, params = self._build_where(
-                    ctx, selected_metric, equipment_type="chiller")
+                    ctx_without_sub, selected_metric, equipment_type="chiller")
                 sql = f"""
                     SELECT
                         AVG(agg_avg) AS avg_val,
