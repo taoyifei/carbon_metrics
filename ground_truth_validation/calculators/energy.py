@@ -46,18 +46,6 @@ def _component_key_for_tag_gt(tag: str) -> Optional[str]:
     return None
 
 class EnergyCalculator:
-from datetime import datetime
-from typing import Dict, Any
-import polars as pl
-import logging
-
-logger = logging.getLogger(__name__)
-COOLING_CAPACITY_FACTOR = 1.1628
-NEGATIVE_DELTA_CLAMP = -0.1
-POSITIVE_DELTA_CLAMP = 1000.0
-
-
-class EnergyCalculator:
     """Calculate energy metrics from Excel data."""
     
     def __init__(self, excel_reader):
@@ -82,7 +70,7 @@ class EnergyCalculator:
         # 3. 从 tag 推断 component_key
         # ExcelReader读取时会把第一列设为tag，这里根据tag内容映射到component_key
         df = df.with_columns(
-            pl.col("tag").apply(_component_key_for_tag_gt).alias("component_key")
+            pl.col("tag").map_elements(_component_key_for_tag_gt, return_dtype=pl.String).alias("component_key")
         )
         df = df.filter(pl.col("component_key").is_not_null())
         if df.is_empty():
