@@ -63,9 +63,30 @@ export const METRIC_FILTER_CONFIG: Record<string, MetricFilterConfig> = {
   '制冷量': SYSTEM_ONLY,
 
   // 冷机效率
-  '冷机平均负载率': fixedType('chiller', true),
-  '冷机最大负载率': fixedType('chiller', true),
-  '冷机负载波动系数': fixedType('chiller', true),
+  '冷机平均负载率': {
+    showBuildingId: true,
+    showSystemId: true,
+    showEquipmentType: false,
+    showEquipmentId: false,
+    showSubEquipmentScope: true,
+    fixedEquipmentType: 'chiller',
+  },
+  '冷机最大负载率': {
+    showBuildingId: true,
+    showSystemId: true,
+    showEquipmentType: false,
+    showEquipmentId: false,
+    showSubEquipmentScope: true,
+    fixedEquipmentType: 'chiller',
+  },
+  '冷机负载波动系数': {
+    showBuildingId: true,
+    showSystemId: true,
+    showEquipmentType: false,
+    showEquipmentId: false,
+    showSubEquipmentScope: true,
+    fixedEquipmentType: 'chiller',
+  },
   '冷机COP': {
     showBuildingId: true,
     showSystemId: true,
